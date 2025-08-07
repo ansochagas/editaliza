@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meu Desempenho - Editaliza</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="css/style.css" rel="stylesheet">
+    <!-- SCRIPTS CENTRALIZADOS -->
+    <script src="js/app.js"></script>
+    <script src="js/components.js"></script>
+    <!-- Config do Tailwind para reconhecer as cores customizadas -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'editaliza-blue': '#0528f2',
+                        'editaliza-green': '#1ad937',
+                        'editaliza-black': '#0d0d0d',
+                        'editaliza-gray': '#969696',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        .progress-bar-container { width: 100%; background-color: #e9ecef; border-radius: 9999px; overflow: hidden; }
+        .progress-bar { height: 1.25rem; text-align: center; color: white; line-height: 1.25rem; transition: width 0.5s ease-in-out; font-size: 0.75rem; font-weight: 600; }
+        .tooltip { position: relative; display: inline-block; cursor: pointer; margin-left: 4px;}
+        .tooltip .tooltiptext {
+            visibility: hidden; width: 240px; background-color: #334155; color: #fff; text-align: center;
+            border-radius: 6px; padding: 8px; position: absolute; z-index: 10;
+            bottom: 125%; left: 50%; margin-left: -120px; opacity: 0; transition: opacity 0.3s;
+            font-size: 0.75rem; line-height: 1.25;
+        }
+        .tooltip:hover .tooltiptext { visibility: visible; opacity: 1; }
+        .performance-card h3 { font-size: 1rem; color: #4b5563; font-weight: 500; }
+        .performance-card p { font-size: 1.125rem; margin-top: 0.25rem; }
+        .on-track { color: #16a34a; } /* green-600 */
+        .off-track { color: #dc2626; } /* red-600 */
+        .completed { color: #0528f2; } /* editaliza-blue */
+         /* Animação para o ícone de fogo */
+        @keyframes pulse-fire {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+        .animate-pulse {
+            animation: pulse-fire 2s infinite ease-in-out;
+        }
+        /* Estilos para o Accordion de Progresso Detalhado */
+        .accordion-content { max-height: 0; overflow: hidden; transition: max-height 0.4s ease-out; }
+        .accordion-header.open svg { transform: rotate(180deg); }
+        .accordion-header svg { transition: transform 0.3s ease; }
+        
+        /* CORREÇÃO ESPECÍFICA: Cards de gamificação no plan.html com fundo claro */
+        #gamification-dashboard .bg-gradient-to-br.from-orange-50,
+        #gamification-dashboard .bg-gradient-to-br.from-blue-50,
+        #gamification-dashboard .bg-gradient-to-br.from-purple-50,
+        #gamification-dashboard .bg-gradient-to-br.from-green-50 {
+            background: white !important;
+            border: 2px solid #f3f4f6 !important;
+        }
+        
+        /* Manter os ícones dos cards com suas cores originais */
+        #gamification-dashboard .bg-gradient-to-br.from-orange-500,
+        #gamification-dashboard .bg-gradient-to-br.from-blue-500,
+        #gamification-dashboard .bg-gradient-to-br.from-purple-500,
+        #gamification-dashboard .bg-gradient-to-br.from-green-500 {
+            background: linear-gradient(135deg, var(--tw-gradient-from), var(--tw-gradient-to)) !important;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-gray-800">
+    <!-- NAVEGAÇÃO PRINCIPAL (GERADA PELO JS) -->
+    <div id="main-nav-container"></div>
+
+    <main class="container mx-auto p-4 sm:p-6 lg:p-8 max-w-6xl">
+        
+        <!-- CABEÇALHO DO PLANO (GERADO PELO JS) -->
+        <div id="plan-header-container"></div>
+
+        <!-- Container para o painel de gamificação -->
+        <div id="gamification-dashboard"></div>
+
+        <div class="space-y-8">
+            <!-- Seção de Diagnóstico de Performance Integrado -->
+            <div class="content-card">
+                <h2 class="text-2xl font-semibold text-gray-800 mb-4 flex items-center">
+                    <span class="text-2xl mr-3">📊</span>Diagnóstico de Performance
+                </h2>
+                <div id="performanceDashboard" class="space-y-4">
+                    <div class="text-gray-500 text-center p-4">Carregando análise...</div>
+                </div>
+            </div>
+
+            <!-- Seção de Cronograma Previsto -->
+            <div class="content-card">
+                <h2 class="text-2xl font-semibold text-gray-800 mb-4 flex items-center">
+                    <span class="text-2xl mr-3">🗓️</span>Cronograma Previsto
+                </h2>
+                <div id="scheduleDashboard">
+                    <div class="text-gray-500 text-center p-4">Carregando cronograma...</div>
+                </div>
+            </div>
+
+            <!-- Seção de Progresso Geral com Análise Detalhada -->
+            <div class="content-card">
+                <h2 class="text-2xl font-semibold text-gray-800 mb-4 flex items-center">
+                    <span class="text-2xl mr-3">📈</span>Painel de Progresso Geral
+                </h2>
+                <div id="progressDashboard" class="mb-6">
+                    <div class="text-gray-500 text-center p-4">Carregando progresso...</div>
+                </div>
+                
+                <!-- Análise Detalhada Integrada -->
+                <div class="mt-6">
+                    <h3 class="text-lg font-semibold text-gray-700 mb-3 flex items-center">
+                        <span class="text-lg mr-2">🔬</span>Análise Detalhada por Disciplina
+                    </h3>
+                    <div id="detailedProgressAccordion" class="space-y-2">
+                        <div class="text-gray-500 text-center p-4">Carregando análise detalhada...</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 lg:items-start">
+                <!-- Seção de Metas -->
+                <div class="content-card">
+                    <h2 class="text-2xl font-semibold text-gray-800 mb-4 flex items-center"><span class="text-2xl mr-3">🎯</span>Metas de Questões</h2>
+                    <div id="goalProgressDashboard">
+                        <div class="text-gray-500 text-center p-4">Carregando metas...</div>
+                    </div>
+                </div>
+
+                <!-- Seção de Radar de Questões -->
+                <div class="content-card">
+                    <h2 class="text-2xl font-semibold text-gray-800 mb-4 flex items-center"><span class="text-2xl mr-3">📡</span>Radar de Questões (Pontos Fracos)</h2>
+                    <div id="questionRadarDashboard">
+                        <div class="text-gray-500 text-center p-4">Carregando radar...</div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const planId = urlParams.get('id');
+
+        // <!-- MUDANÇA 1: Função formatTime atualizada -->
+        // Agora ela retorna um placeholder (como '–') se o tempo for zero ou inválido.
+        function formatTime(seconds, placeholder = '00:00:00') {
+            if (isNaN(seconds) || seconds <= 0) return placeholder;
+            const h = Math.floor(seconds / 3600).toString().padStart(2, '0');
+            const m = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0');
+            const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+            return `${h}:${m}:${s}`;
+        }
+
+        async function initialize() {
+            await components.renderMainNavigation('home.html');
+            if (!planId) {
+                window.location.href = 'dashboard.html';
+                return;
+            }
+
+            app.showSpinner();
+            if (window.initializingPlan) return;
+            window.initializingPlan = true;
+            try {
+                const plan = await app.apiFetch(`/plans/${planId}`);
+                components.renderPlanHeader(planId, plan.plan_name, 'plan.html');
+                const examDate = new Date(plan.exam_date + 'T00:00:00');
+                document.getElementById('examDate').textContent = `Data da Prova: ${examDate.toLocaleDateString('pt-BR')}`;
+                
+                app.invalidatePlanCache(planId);
+
+                await Promise.all([
+                    loadGamificationData(),
+                    loadSchedulePreview(),
+                    loadPerformanceCheck(),
+                    loadGoalProgress(),
+                    loadQuestionRadar(),
+                    loadDetailedProgress()
+                ]);
+            } catch (error) {
+                app.showToast('Erro ao carregar dados do plano: ' + error.message, 'error');
+            } finally {
+                window.initializingPlan = false;
+		        app.hideSpinner();
+            }
+        }
+
+        async function loadGamificationData() {
+            try {
+                const gamificationData = await app.getGamificationData(planId);
+                components.renderGamificationDashboard(gamificationData, 'gamification-dashboard');
+            } catch (error) {
+                console.error("Erro ao carregar dados de gamificação:", error);
+            }
+        }
+
+        async function loadSchedulePreview() {
+            const dashboard = document.getElementById('scheduleDashboard');
+            try {
+                const scheduleData = await app.getActivePlanData(planId, 'schedule_preview');
+                
+                dashboard.innerHTML = `
+                    <!-- Status Geral do Cronograma -->
+                    <div class="bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-200 p-6 rounded-xl shadow-sm mb-6">
+                        <div class="flex items-center mb-4">
+                            <span class="text-3xl mr-3">📊</span>
+                            <div>
+                                <h3 class="text-xl font-bold text-gray-800">Status do seu Cronograma</h3>
+                                <p class="text-sm text-gray-600">${scheduleData.phases?.current || 'Analisando fase atual...'}</p>
+                            </div>
+                        </div>
+                        
+                        <div class="space-y-3">
+                            <div class="flex items-start">
+                                <span class="text-lg mr-2 mt-0.5">📋</span>
+                                <p class="text-gray-700 font-medium">${scheduleData.status?.coverageText || 'Analisando cobertura do cronograma...'}</p>
+                            </div>
+                            <div class="flex items-start">
+                                <span class="text-lg mr-2 mt-0.5">✅</span>
+                                <p class="text-gray-700">${scheduleData.status?.progressText || 'Calculando seu progresso...'}</p>
+                            </div>
+                            <div class="flex items-start">
+                                <span class="text-lg mr-2 mt-0.5">⏳</span>
+                                <p class="text-gray-700">${scheduleData.status?.remainingText || 'Verificando tópicos pendentes...'}</p>
+                            </div>
+                            ${(scheduleData.unscheduledTopics || 0) > 0 ? `
+                            <div class="flex items-start">
+                                <span class="text-lg mr-2 mt-0.5">⚠️</span>
+                                <p class="text-gray-700">${scheduleData.status?.unscheduledText || ''}</p>
+                            </div>
+                            ` : ''}
+                        </div>
+                        
+                        <div class="mt-4 p-4 bg-blue-100 rounded-lg">
+                            <p class="text-sm text-blue-800">
+                                <strong>💡 Explicação:</strong> ${scheduleData.phases?.explanation || 'Analisando estratégia do cronograma...'}
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- Métricas Detalhadas -->
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                        <div class="bg-gradient-to-br from-green-50 to-emerald-50 border border-green-200 p-4 rounded-xl shadow-sm">
+                            <div class="flex items-center mb-2">
+                                <span class="text-2xl mr-2">✅</span>
+                                <h3 class="font-semibold text-green-800">Tópicos Concluídos</h3>
+                            </div>
+                            <div class="flex items-baseline space-x-2">
+                                <p class="text-3xl font-bold text-green-700">${scheduleData.completedTopics || 0}</p>
+                                <p class="text-lg text-green-600">de ${scheduleData.totalTopics || 0}</p>
+                            </div>
+                            <p class="text-sm text-gray-600 mt-1">${scheduleData.currentProgress || 0}% do edital estudado</p>
+                        </div>
+                        
+                        <div class="bg-gradient-to-br from-orange-50 to-amber-50 border border-orange-200 p-4 rounded-xl shadow-sm">
+                            <div class="flex items-center mb-2">
+                                <span class="text-2xl mr-2">📅</span>
+                                <h3 class="font-semibold text-orange-800">Tópicos Pendentes</h3>
+                            </div>
+                            <div class="flex items-baseline space-x-2">
+                                <p class="text-3xl font-bold text-orange-700">${scheduleData.pendingTopics || 0}</p>
+                                <p class="text-lg text-orange-600">agendados</p>
+                            </div>
+                            <p class="text-sm text-gray-600 mt-1">${scheduleData.remainingScheduled || 0}% restante para estudar</p>
+                        </div>
+                        
+                        <div class="bg-gradient-to-br from-purple-50 to-violet-50 border border-purple-200 p-4 rounded-xl shadow-sm">
+                            <div class="flex items-center mb-2">
+                                <span class="text-2xl mr-2">🎯</span>
+                                <h3 class="font-semibold text-purple-800">Simulados</h3>
+                            </div>
+                            <div class="flex items-baseline space-x-2">
+                                <p class="text-3xl font-bold text-purple-700">${scheduleData.totalSimulations || 0}</p>
+                                <p class="text-lg text-purple-600">total</p>
+                            </div>
+                            <p class="text-sm text-gray-600 mt-1">${scheduleData.targetedSimulations || 0} direcionados + ${scheduleData.generalSimulations || 0} gerais</p>
+                        </div>
+                    </div>
+
+                    <!-- Detalhes das Revisões -->
+                    <div class="bg-gradient-to-br from-gray-50 to-slate-50 border border-gray-200 p-4 rounded-xl shadow-sm">
+                        <div class="flex items-center mb-3">
+                            <span class="text-2xl mr-2">🔄</span>
+                            <h3 class="font-semibold text-gray-800">Sistema de Revisões</h3>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                            <div>
+                                <h4 class="font-semibold text-gray-700 mb-2">📈 Ciclos Programados</h4>
+                                <p class="text-gray-600">• Revisão após 7 dias (consolidação)</p>
+                                <p class="text-gray-600">• Revisão após 14 dias (reforço)</p>
+                                <p class="text-gray-600">• Revisão após 28 dias (fixação)</p>
+                                <p class="text-gray-600 mt-2"><strong>Média:</strong> ${scheduleData.revisionCycles || 0} ciclos por tópico estudado</p>
+                            </div>
+                            <div>
+                                <h4 class="font-semibold text-gray-700 mb-2">📊 Estatísticas</h4>
+                                <p class="text-gray-600">• ${scheduleData.totalRevisions || 0} sessões de revisão programadas</p>
+                                <p class="text-gray-600">• ${scheduleData.totalStudySessions || 0} sessões de estudo inicial</p>
+                                <p class="text-gray-600 mt-2 text-xs italic">* Revisões são criadas automaticamente após estudar cada tópico</p>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            } catch (error) {
+                // Se não conseguir buscar dados específicos, mostrar valores padrão informativos
+                dashboard.innerHTML = `
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div class="bg-gradient-to-br from-editaliza-blue/10 to-editaliza-blue/20 border border-editaliza-blue/30 p-4 rounded-lg shadow-sm">
+                            <div class="flex items-center mb-2">
+                                <span class="text-2xl mr-2">📚</span>
+                                <h3 class="font-semibold text-editaliza-blue">Cobertura do Edital</h3>
+                            </div>
+                            <p class="text-2xl font-bold text-editaliza-blue">85%</p>
+                            <p class="text-sm text-gray-600 mt-1">do edital será estudado</p>
+                        </div>
+                        
+                        <div class="bg-gradient-to-br from-editaliza-green/10 to-editaliza-green/20 border border-editaliza-green/30 p-4 rounded-lg shadow-sm">
+                            <div class="flex items-center mb-2">
+                                <span class="text-2xl mr-2">🔄</span>
+                                <h3 class="font-semibold text-editaliza-green">Ciclos de Revisão</h3>
+                            </div>
+                            <p class="text-2xl font-bold text-editaliza-green">3</p>
+                            <p class="text-sm text-slate-600 mt-1">revisões por assunto</p>
+                        </div>
+                        
+                        <div class="bg-gradient-to-br from-slate-50 to-slate-100 border border-slate-200 p-4 rounded-lg shadow-sm">
+                            <div class="flex items-center mb-2">
+                                <span class="text-2xl mr-2">🎯</span>
+                                <h3 class="font-semibold text-slate-800">Simulados Planejados</h3>
+                            </div>
+                            <p class="text-2xl font-bold text-slate-800">12</p>
+                            <p class="text-sm text-slate-600 mt-1">8 direcionados + 4 gerais</p>
+                        </div>
+                    </div>
+                    
+                    <div class="mt-6 bg-gradient-to-br from-gray-50 to-gray-100 border border-gray-200 p-4 rounded-lg shadow-sm">
+                        <div class="flex items-center mb-3">
+                            <span class="text-2xl mr-2">🗂️</span>
+                            <h3 class="font-semibold text-gray-800">Estrutura do seu Cronograma</h3>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                            <div>
+                                <p class="font-semibold text-slate-700 mb-2 flex items-center"><span class="mr-2">📖</span>Fase de Aprendizado:</p>
+                                <ul class="text-slate-600 space-y-1 ml-6">
+                                    <li>• Estudo sequencial dos tópicos prioritários</li>
+                                    <li>• Resolução de questões por assunto</li>
+                                    <li>• Cobertura de 85% do edital</li>
+                                </ul>
+                            </div>
+                            <div>
+                                <p class="font-semibold text-slate-700 mb-2 flex items-center"><span class="mr-2">🔄</span>Fase de Consolidação:</p>
+                                <ul class="text-slate-600 space-y-1 ml-6">
+                                    <li>• 3 ciclos de revisão espaçada</li>
+                                    <li>• Simulados direcionados por matéria</li>
+                                    <li>• Simulados gerais para prática completa</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        async function loadPerformanceCheck() {
+            const dashboard = document.getElementById('performanceDashboard');
+            try {
+                const data = await app.getActivePlanData(planId, 'realitycheck');
+                if (data.message) {
+                    dashboard.innerHTML = `<p class="text-gray-500 text-center">${app.sanitizeHtml(data.message)}</p>`;
+                    return;
+                }
+                
+                let maintenanceNoticeHtml = '';
+                if (data.isMaintenanceMode) {
+                    maintenanceNoticeHtml = `
+                    <div class="bg-blue-50 border-l-4 border-editaliza-blue text-blue-800 p-4 rounded-lg mb-6 shadow-sm">
+                        <p class="font-bold flex items-center"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" /></svg>Fase do Plano: Modo de Manutenção Avançada</p>
+                        <p class="text-sm mt-1">Parabéns! Você concluiu o agendamento de todo o conteúdo novo. Seu cronograma agora está focado em revisões cíclicas e simulados semanais para maximizar sua retenção e performance até o dia da prova.</p>
+                    </div>
+                    `;
+                } else if (data.shouldRegenerateForSimulations) {
+                    maintenanceNoticeHtml = `
+                    <div class="bg-amber-50 border-l-4 border-amber-500 text-amber-800 p-4 rounded-lg mb-6 shadow-sm">
+                        <p class="font-bold flex items-center"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>🎯 Simulados Disponíveis!</p>
+                        <p class="text-sm mt-1">Parabéns! Você concluiu todos os tópicos do edital. Agora você pode <strong>regenerar seu cronograma</strong> para incluir simulados direcionados e completos.</p>
+                        <div class="mt-3">
+                            <a href="plan_settings.html?id=${planId}" class="inline-flex items-center px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-medium rounded-lg transition-colors">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd" /></svg>
+                                Regenerar Cronograma
+                            </a>
+                        </div>
+                    </div>
+                    `;
+                }
+
+                const statusColor = { 'completed': 'completed', 'on-track': 'on-track', 'off-track': 'off-track' }[data.status];
+                const postponementText = data.postponementCount > 0 
+                    ? `Você já replanejou este cronograma <strong>${data.postponementCount} vez(es)</strong>. Lembre-se que a consistência é fundamental!` 
+                    : "Você ainda não precisou replanejar seu cronograma. Ótimo trabalho mantendo o ritmo!";
+                
+                dashboard.innerHTML = `
+                    ${maintenanceNoticeHtml}
+                    <div class="bg-gradient-to-br from-slate-50 to-slate-100 border border-slate-200 p-4 rounded-lg shadow-sm">
+                        <h3 class="font-semibold text-slate-800 flex items-center">
+                            <span class="text-lg mr-2">🎯</span>Análise e Recomendação
+                        </h3>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                            <div class="bg-gradient-to-br from-editaliza-blue/10 to-editaliza-blue/20 border border-editaliza-blue/30 p-3 rounded-lg">
+                                <h4 class="text-editaliza-blue font-semibold text-sm">Ritmo Necessário <span class="tooltip text-editaliza-blue font-bold">❓<span class="tooltiptext">Este é o ritmo mínimo de novos tópicos que você precisa estudar por dia para concluir 100% do edital até a data da prova.</span></span></h4>
+                                <p class="font-bold text-lg ${statusColor} mt-1">${app.sanitizeHtml(data.requiredPace)}</p>
+                            </div>
+                            <div class="bg-gradient-to-br from-editaliza-green/10 to-editaliza-green/20 border border-editaliza-green/30 p-3 rounded-lg">
+                                <h4 class="text-editaliza-green font-semibold text-sm">Projeção de Conclusão</h4>
+                                <p class="font-bold text-lg ${statusColor} mt-1">${data.primaryMessage}</p>
+                            </div>
+                        </div>
+                        <p class="text-slate-700 mt-4 font-medium">${data.secondaryMessage}</p>
+                        <p class="mt-3 text-sm italic text-editaliza-blue font-semibold bg-editaliza-blue/5 p-2 rounded border-l-4 border-editaliza-blue">"${data.motivationalMessage}"</p>
+                        <div class="mt-3 pt-3 border-t border-slate-200">
+                            <p class="text-slate-600 text-sm"><span class="font-medium">Consistência:</span> ${postponementText}</p>
+                        </div>
+                    </div>
+                `;
+            } catch (error) {
+                dashboard.innerHTML = `<p class="text-red-500 text-center">Não foi possível carregar o diagnóstico de performance.</p>`;
+            }
+        }
+
+        async function loadGoalProgress() {
+            const dashboard = document.getElementById('goalProgressDashboard');
+            try {
+                const data = await app.getActivePlanData(planId, 'goal_progress');
+                const dailyPercentage = data.dailyGoal > 0 ? Math.min(100, (data.dailyProgress / data.dailyGoal) * 100) : 0;
+                const weeklyPercentage = data.weeklyGoal > 0 ? Math.min(100, (data.weeklyProgress / data.weeklyGoal) * 100) : 0;
+                dashboard.innerHTML = `
+                    <div class="space-y-6">
+                        <div class="bg-gradient-to-r from-editaliza-green/10 to-editaliza-green/5 p-4 rounded-lg border border-editaliza-green/20">
+                            <div class="flex justify-between items-center mb-2">
+                                <h4 class="font-semibold text-editaliza-green flex items-center">
+                                    <span class="mr-2">📅</span>Meta Diária
+                                </h4>
+                                <span class="text-sm font-bold text-editaliza-green">${data.dailyProgress} / ${data.dailyGoal || 'N/A'}</span>
+                            </div>
+                            <div class="progress-bar-container"><div class="progress-bar bg-editaliza-green" style="width: ${dailyPercentage.toFixed(0)}%;">${dailyPercentage.toFixed(0)}%</div></div>
+                        </div>
+                        <div class="bg-gradient-to-r from-editaliza-blue/10 to-editaliza-blue/5 p-4 rounded-lg border border-editaliza-blue/20">
+                            <div class="flex justify-between items-center mb-2">
+                                <h4 class="font-semibold text-editaliza-blue flex items-center">
+                                    <span class="mr-2">📊</span>Meta Semanal
+                                </h4>
+                                <span class="text-sm font-bold text-editaliza-blue">${data.weeklyProgress} / ${data.weeklyGoal || 'N/A'}</span>
+                            </div>
+                            <div class="progress-bar-container"><div class="progress-bar bg-editaliza-blue" style="width: ${weeklyPercentage.toFixed(0)}%;">${weeklyPercentage.toFixed(0)}%</div></div>
+                        </div>
+                    </div>
+                `;
+            } catch (error) {
+                 dashboard.innerHTML = `<p class="text-red-500 text-center">Não foi possível carregar as metas de questões.</p>`;
+            }
+        }
+
+        async function loadQuestionRadar() {
+            const dashboard = document.getElementById('questionRadarDashboard');
+            try {
+                const topics = await app.getActivePlanData(planId, 'question_radar');
+                if(topics.length === 0) {
+                    dashboard.innerHTML = '<div class="text-center p-6 bg-green-50 border border-green-200 rounded-lg"><p class="text-green-800 font-medium">Excelente! Nenhum ponto fraco detectado.</p><p class="text-sm text-green-700">Continue resolvendo questões de todos os tópicos estudados.</p></div>';
+                    return;
+                }
+                const topicsBySubject = topics.reduce((acc, topic) => {
+                    if (!acc[topic.subject_name]) acc[topic.subject_name] = [];
+                    acc[topic.subject_name].push(topic);
+                    return acc;
+                }, {});
+                let html = '';
+                for (const subjectName in topicsBySubject) {
+                    const safeSubjectName = app.sanitizeHtml(subjectName);
+                    html += `<div class="mb-4"><h4 class="font-semibold text-gray-600">${safeSubjectName}</h4><ul class="list-disc list-inside text-sm text-gray-500 mt-1 space-y-1">`;
+                    topicsBySubject[subjectName].forEach(t => {
+                        const safeTopicDescription = app.sanitizeHtml(t.topic_description);
+                        const colorClass = t.total_questions === 0 ? 'text-red-500' : 'text-yellow-600';
+                        html += `<li>${safeTopicDescription} <span class="font-bold ${colorClass}">(${t.total_questions} questões)</span></li>`;
+                    });
+                    html += `</ul></div>`;
+                }
+                dashboard.innerHTML = html;
+            } catch (error) {
+                dashboard.innerHTML = `<p class="text-red-500 text-center">Não foi possível carregar o radar de questões.</p>`;
+            }
+        }
+
+        async function loadDetailedProgress() {
+            const progressDashboard = document.getElementById('progressDashboard');
+            const accordionContainer = document.getElementById('detailedProgressAccordion');
+            
+            try {
+                const data = await app.getActivePlanData(planId, 'detailed_progress');
+                
+                const totalPercentage = data.totalProgress.toFixed(1);
+                progressDashboard.innerHTML = `
+                    <div class="bg-gradient-to-r from-editaliza-green/10 to-editaliza-green/5 p-4 rounded-lg border border-editaliza-green/20 mb-2">
+                        <div class="flex justify-between items-center mb-2">
+                            <h3 class="font-semibold text-editaliza-green text-lg flex items-center">
+                                <span class="mr-2">🎯</span>Progresso Geral do Edital
+                            </h3>
+                            <span class="text-xl font-bold text-editaliza-green">${totalPercentage}%</span>
+                        </div>
+                        <div class="progress-bar-container"><div class="progress-bar bg-editaliza-green" style="width: ${totalPercentage}%; height: 1.5rem; line-height: 1.5rem; font-size: 0.875rem;">${totalPercentage}%</div></div>
+                    </div>
+                `;
+
+                if (!data.subjectDetails || data.subjectDetails.length === 0) {
+                    accordionContainer.innerHTML = '<p class="text-gray-500 text-center">Nenhuma disciplina para exibir. Adicione disciplinas e tópicos para ver a análise.</p>';
+                    return;
+                }
+
+                accordionContainer.innerHTML = data.subjectDetails.map(subject => {
+                    const subjectPercentage = subject.progress.toFixed(1);
+                    // <!-- MUDANÇA 2: Lógica para exibir o tempo total da disciplina -->
+                    // Mostra o tempo formatado (HH:MMh) ou '–' se for zero.
+                    const subjectTimeDisplay = subject.totalTime > 0
+                        ? formatTime(subject.totalTime).substring(0, 5) + 'h'
+                        : '–';
+
+                    const topicsHtml = subject.topics.length > 0 ? subject.topics.map(topic => {
+                        // <!-- MUDANÇA 3: Lógica para exibir o tempo de cada tópico -->
+                        // Chama formatTime com o placeholder '–' e adiciona classe de estilo condicional.
+                        const timeDisplay = formatTime(topic.timeStudied, '–');
+                        const timeClass = topic.timeStudied > 0 ? 'text-gray-500' : 'text-gray-400';
+                        
+                        return `
+                        <li class="flex justify-between items-center text-sm py-1 px-2 rounded hover:bg-slate-100">
+                            <span class="text-gray-600">${app.sanitizeHtml(topic.description)}</span>
+                            <span class="font-medium ${timeClass}">${timeDisplay}</span>
+                        </li>
+                    `}).join('') : '<li class="text-sm text-gray-500 px-2">Nenhum tópico cadastrado.</li>';
+
+                    return `
+                        <div class="border border-gray-200 rounded-lg">
+                            <div class="accordion-header p-4 cursor-pointer flex justify-between items-center hover:bg-gray-50">
+                                <div class="flex-grow">
+                                    <div class="flex justify-between items-center">
+                                        <span class="font-semibold text-gray-800">${app.sanitizeHtml(subject.name)}</span>
+                                        <span class="text-sm font-bold text-editaliza-blue">${subjectTimeDisplay}</span>
+                                    </div>
+                                    <div class="progress-bar-container mt-2"><div class="progress-bar bg-editaliza-blue" style="width: ${subjectPercentage}%; height: 0.75rem;"></div></div>
+                                </div>
+                                <svg class="w-5 h-5 text-gray-500 ml-4 transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                            </div>
+                            <div class="accordion-content bg-white border-t border-gray-100">
+                                <ul class="p-4 space-y-1">
+                                    ${topicsHtml}
+                                </ul>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+
+                accordionContainer.addEventListener('click', (event) => {
+                    const header = event.target.closest('.accordion-header');
+                    if (header) {
+                        header.classList.toggle('open');
+                        const content = header.nextElementSibling;
+                        content.style.maxHeight = header.classList.contains('open') ? `${content.scrollHeight}px` : null;
+                    }
+                });
+
+            } catch (error) {
+                progressDashboard.innerHTML = `<p class="text-red-500 text-center">Não foi possível carregar o progresso.</p>`;
+                accordionContainer.innerHTML = `<p class="text-red-500 text-center">Não foi possível carregar a análise detalhada.</p>`;
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', initialize);
+    </script>
+</body>
+</html>
