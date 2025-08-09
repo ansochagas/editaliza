@@ -1,74 +1,48 @@
-# Multi-stage build for production optimization
 # Stage 1: Build dependencies
-FROM node:18-alpine AS dependencies
+# Use a specific Node.js version for reproducibility.
+FROM node:18.17.0-alpine AS dependencies
 
-# Set working directory
 WORKDIR /app
 
-# Install security updates and create non-root user
-RUN apk update && apk upgrade && \
-    apk add --no-cache dumb-init sqlite && \
-    addgroup -g 1001 -S nodejs && \
-    adduser -S editaliza -u 1001
+# Install dumb-init, a lightweight init system for containers
+RUN apk add --no-cache dumb-init
 
 # Copy package files
 COPY package*.json ./
 
 # Install production dependencies
-RUN npm ci --only=production && npm cache clean --force
+# Using 'ci' ensures a clean, consistent install based on package-lock.json
+RUN npm ci --only=production
 
 # Stage 2: Production image
-FROM node:18-alpine AS production
+# Use the same base image for consistency
+FROM node:18.17.0-alpine AS production
 
-# Install dumb-init for proper signal handling
-RUN apk add --no-cache dumb-init sqlite
+# Create a non-root user for security
+RUN addgroup -S nonroot && adduser -S nonroot -G nonroot
 
-# Create non-root user
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S editaliza -u 1001
-
-# Set working directory
 WORKDIR /app
 
-# Copy dependencies from build stage
-COPY --from=dependencies --chown=editaliza:nodejs /app/node_modules ./node_modules
+# Copy pre-installed dependencies and dumb-init from the 'dependencies' stage
+COPY --from=dependencies /app/node_modules ./node_modules
+COPY --from=dependencies /usr/bin/dumb-init /usr/bin/dumb-init
 
-# Copy application files
-COPY --chown=editaliza:nodejs package*.json ./
-COPY --chown=editaliza:nodejs server.js ./
-COPY --chown=editaliza:nodejs database.js ./
-COPY --chown=editaliza:nodejs middleware.js ./
-COPY --chown=editaliza:nodejs performance_middleware.js ./
-COPY --chown=editaliza:nodejs performance_benchmark.js ./
+# Copy the rest of the application code
+# This includes server.js, middleware.js, src/, html files, etc.
+COPY . .
 
-# Copy static files
-COPY --chown=editaliza:nodejs *.html ./
-COPY --chown=editaliza:nodejs css/ ./css/
-COPY --chown=editaliza:nodejs js/ ./js/
+# Switch to the non-root user
+USER nonroot
 
-# Create directories for application data
-RUN mkdir -p /app/data /app/logs && \
-    chown -R editaliza:nodejs /app/data /app/logs
-
-# Set environment variables
+# Set environment variables for production
 ENV NODE_ENV=production
-ENV PORT=3000
-ENV DATABASE_PATH=/app/data/database.db
-ENV SESSION_SECRET_FILE=/run/secrets/session_secret
-ENV JWT_SECRET_FILE=/run/secrets/jwt_secret
+ENV PORT=8080
 
-# Expose port
-EXPOSE 3000
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD node -e "const http=require('http');http.get('http://localhost:3000/health',(r)=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"
-
-# Switch to non-root user
-USER editaliza
+# Expose the port the app runs on
+EXPOSE 8080
 
 # Use dumb-init to handle signals properly
-ENTRYPOINT ["dumb-init", "--"]
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
 
-# Start application
+# Start the application
 CMD ["node", "server.js"]

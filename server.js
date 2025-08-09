@@ -1,6 +1,5 @@
-// server.js - Versão com correções de segurança
+// server.js - Versão com correções de segurança e suporte a PostgreSQL
 const express = require('express');
-const db = require('./database.js');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
@@ -9,11 +8,9 @@ const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const { body, query, validationResult } = require('express-validator');
 const session = require('express-session');
-const SQLiteStore = require('connect-sqlite3')(session);
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-// Import modular Passport configuration
 const passport = require('./src/config/passport');
 require('dotenv').config();
 
@@ -28,6 +25,67 @@ const {
 
 
 // ============================================================================
+// INICIALIZAÇÃO DO BANCO DE DADOS (SQLite ou PostgreSQL)
+// ============================================================================
+const isProduction = process.env.NODE_ENV === 'production';
+let db, dbGet, dbAll, dbRun, sessionStore;
+
+if (isProduction) {
+    console.log('🚀 Executando em modo de produção. Usando PostgreSQL.');
+    const { pool, testConnection } = require('./database-cloud.js');
+    db = pool;
+    
+    // Testar a conexão com o PostgreSQL ao iniciar
+    testConnection().catch(err => {
+        console.error("FATAL: Não foi possível conectar ao PostgreSQL. A aplicação será encerrada.", err);
+        process.exit(1);
+    });
+
+    const pgSession = require('connect-pg-simple')(session);
+    sessionStore = new pgSession({
+        pool: db,
+        tableName: 'sessions',
+        createTableIfMissing: true,
+    });
+
+} else {
+    console.log('🔧 Executando em modo de desenvolvimento. Usando SQLite.');
+    const sqliteDb = require('./database.js');
+    db = sqliteDb;
+
+    const SQLiteStore = require('connect-sqlite3')(session);
+    sessionStore = new SQLiteStore({
+        db: 'sessions.db',
+        dir: './'
+    });
+}
+
+// Funções utilitárias para interagir com o banco de dados usando Promises
+if (!isProduction) {
+    dbGet = (sql, params = []) => new Promise((resolve, reject) => db.get(sql, params, (err, row) => err ? reject(err) : resolve(row)));
+    dbAll = (sql, params = []) => new Promise((resolve, reject) => db.all(sql, params, (err, rows) => err ? reject(err) : resolve(rows)));
+    dbRun = (sql, params = []) => new Promise((resolve, reject) => db.run(sql, params, function(err) { err ? reject(err) : resolve(this) }));
+} else {
+    dbGet = async (sql, params = []) => {
+        const { rows } = await db.query(sql, params);
+        return rows[0];
+    };
+    dbAll = async (sql, params = []) => {
+        const { rows } = await db.query(sql, params);
+        return rows;
+    };
+    dbRun = async (sql, params = []) => {
+        const result = await db.query(sql, params);
+        // Emular a interface do 'sqlite3' para 'lastID' e 'changes'
+        return {
+            lastID: result.rows[0] ? result.rows[0].id : null,
+            changes: result.rowCount
+        };
+    };
+}
+
+
+// ============================================================================
 // VALIDAÇÃO DE SEGURANÇA EM PRODUÇÃO
 // ============================================================================
 const { validateProductionSecrets } = require('./src/utils/security');
@@ -38,7 +96,7 @@ try {
     console.log('✅ Secrets de produção validados');
 } catch (error) {
     console.error('❌ ERRO DE SEGURANÇA:', error.message);
-    if (process.env.NODE_ENV === 'production') {
+    if (isProduction) {
         process.exit(1); // Não permitir inicialização sem secrets
     }
 }
@@ -55,7 +113,7 @@ app.use(helmet({
             styleSrc: ["'self'", "'unsafe-inline'", "https://cdn.tailwindcss.com", "https://fonts.googleapis.com"],
             scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.tailwindcss.com"],
             fontSrc: ["'self'", "https://fonts.gstatic.com"],
-            imgSrc: ["'self'", "data:", "https:"],
+            imgSrc: ["'self'", "data:", "https:"] ,
             connectSrc: ["'self'", "https://accounts.google.com"],
             formAction: ["'self'", "https://accounts.google.com"],
         },
@@ -71,8 +129,7 @@ app.use(helmet({
 const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000'];
 app.use(cors({
     origin: function (origin, callback) {
-        // CORREÇÃO: Ser mais restritivo mesmo em desenvolvimento
-        if (!origin && process.env.NODE_ENV === 'development') {
+        if (!origin && !isProduction) {
             return callback(null, true);
         }
         if (allowedOrigins.indexOf(origin) !== -1) {
@@ -84,20 +141,17 @@ app.use(cors({
     },
     credentials: true,
     optionsSuccessStatus: 200,
-    exposedHeaders: ['X-Total-Count'] // Headers seguros para expor
+    exposedHeaders: ['X-Total-Count']
 }));
 
 // Configuração de sessão
 app.use(session({
-    store: new SQLiteStore({
-        db: 'sessions.db',
-        dir: './'
-    }),
+    store: sessionStore,
     secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex'),
     resave: false,
     saveUninitialized: false,
     cookie: {
-        secure: process.env.NODE_ENV === 'production', // HTTPS em produção
+        secure: isProduction,
         httpOnly: true,
         maxAge: 24 * 60 * 60 * 1000 // 24 horas
     }
@@ -106,195 +160,6 @@ app.use(session({
 // Configure Passport
 app.use(passport.initialize());
 app.use(passport.session());
-
-/*
-// LEGACY PASSPORT CONFIGURATION - MOVED TO src/config/passport.js
-// Passport Google OAuth Strategy
-passport.use(new GoogleStrategy({
-    clientID: process.env.GOOGLE_CLIENT_ID,
-    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    callbackURL: process.env.GOOGLE_CALLBACK_URL || "/auth/google/callback"
-}, async (accessToken, refreshToken, profile, done) => {
-    try {
-        // Check if user already exists with Google ID
-        const existingUser = await new Promise((resolve, reject) => {
-            db.get(
-                'SELECT * FROM users WHERE google_id = ?',
-                [profile.id],
-                (err, row) => {
-                    if (err) reject(err);
-                    else resolve(row);
-                }
-            );
-        });
-
-        if (existingUser) {
-            return done(null, existingUser);
-        }
-
-        // Check if user exists with same email
-        const emailUser = await new Promise((resolve, reject) => {
-            db.get(
-                'SELECT * FROM users WHERE email = ?',
-                [profile.emails[0].value],
-                (err, row) => {
-                    if (err) reject(err);
-                    else resolve(row);
-                }
-            );
-        });
-
-        if (emailUser) {
-            // Link Google account to existing user
-            await new Promise((resolve, reject) => {
-                db.run(
-                    'UPDATE users SET google_id = ?, auth_provider = "google", google_avatar = ?, name = ? WHERE id = ?',
-                    [profile.id, profile.photos[0]?.value, profile.displayName, emailUser.id],
-                    function(err) {
-                        if (err) reject(err);
-                        else resolve();
-                    }
-                );
-            });
-            
-            // Return updated user
-            const updatedUser = await new Promise((resolve, reject) => {
-                db.get(
-                    'SELECT * FROM users WHERE id = ?',
-                    [emailUser.id],
-                    (err, row) => {
-                        if (err) reject(err);
-                        else resolve(row);
-                    }
-                );
-            });
-            
-            return done(null, updatedUser);
-        }
-
-        // Create new user
-        const newUser = await new Promise((resolve, reject) => {
-            const currentDate = new Date().toISOString();
-            db.run(
-                `INSERT INTO users (email, name, google_id, auth_provider, google_avatar, created_at) 
-                 VALUES (?, ?, ?, "google", ?, ?)`,
-                [profile.emails[0].value, profile.displayName, profile.id, profile.photos[0]?.value, currentDate],
-                function(err) {
-                    if (err) reject(err);
-                    else {
-                        db.get(
-                            'SELECT * FROM users WHERE id = ?',
-                            [this.lastID],
-                            (err, row) => {
-                                if (err) reject(err);
-                                else resolve(row);
-                            }
-                        );
-                    }
-                }
-            );
-        });
-
-        return done(null, newUser);
-    } catch (error) {
-        console.error('Google OAuth Error:', error);
-        return done(error, null);
-    }
-}));
-
-// Serialize user for session
-passport.serializeUser((user, done) => {
-    done(null, user.id);
-});
-
-// Deserialize user from session
-passport.deserializeUser(async (id, done) => {
-    try {
-        const user = await new Promise((resolve, reject) => {
-            db.get(
-                'SELECT * FROM users WHERE id = ?',
-                [id],
-                (err, row) => {
-                    if (err) reject(err);
-                    else resolve(row);
-                }
-            );
-        });
-        done(null, user);
-    } catch (error) {
-        done(error, null);
-    }
-});
-*/
-
-/*
-// ============================================================================
-// LEGACY UPLOAD ROUTE - MOVED TO /auth/profile/upload-photo
-// ============================================================================
-const { validateFilePath, createSafeError, securityLog } = require('./src/utils/security');
-
-app.post('/profile/upload-photo', authenticateToken, (req, res) => {
-    upload.single('photo')(req, res, async (err) => {
-        if (err) {
-            securityLog('upload_error', { error: err.message }, req.user.id, req);
-            if (err instanceof multer.MulterError) {
-                if (err.code === 'LIMIT_FILE_SIZE') {
-                    return res.status(400).json({ error: 'Arquivo muito grande. Máximo 5MB.' });
-                }
-            }
-            return res.status(400).json({ error: err.message });
-        }
-        
-        if (!req.file) {
-            securityLog('upload_no_file', {}, req.user.id, req);
-            return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
-        }
-        
-        try {
-            // Obter a foto de perfil anterior para deletar
-            const user = await dbGet('SELECT profile_picture FROM users WHERE id = ?', [req.user.id]);
-            const oldPhoto = user?.profile_picture;
-            
-            // Atualizar o caminho da foto no banco
-            const photoPath = `/uploads/${req.file.filename}`;
-            await dbRun('UPDATE users SET profile_picture = ? WHERE id = ?', [photoPath, req.user.id]);
-            
-            // CORREÇÃO CRÍTICA: Validação segura de path antes de deletar
-            if (oldPhoto && oldPhoto !== photoPath && oldPhoto.startsWith('/uploads/')) {
-                try {
-                    const validatedPath = validateFilePath(oldPhoto, 'uploads');
-                    const oldFilePath = path.join(__dirname, validatedPath.substring(1));
-                    if (fs.existsSync(oldFilePath)) {
-                        fs.unlinkSync(oldFilePath);
-                        securityLog('old_photo_deleted', { path: validatedPath }, req.user.id, req);
-                    }
-                } catch (pathError) {
-                    securityLog('invalid_photo_path', { error: pathError.message, path: oldPhoto }, req.user.id, req);
-                    // Continue sem deletar se path for inválido
-                }
-            }
-            
-            securityLog('photo_uploaded', { photoPath }, req.user.id, req);
-            res.json({
-                message: 'Foto de perfil atualizada com sucesso!',
-                profile_picture: photoPath
-            });
-            
-        } catch (error) {
-            securityLog('upload_database_error', error.message, req.user.id, req);
-            
-            // Deletar arquivo se houver erro ao salvar no banco
-            if (req.file && fs.existsSync(req.file.path)) {
-                fs.unlinkSync(req.file.path);
-            }
-            
-            res.status(500).json(createSafeError(error, 'Erro ao salvar foto de perfil'));
-        }
-    });
-});
-*/
-
-
 
 // Middleware para parsing e sanitização
 app.use(express.json({ limit: '10mb' }));
@@ -323,7 +188,13 @@ const globalLimiter = rateLimit({
 app.use(globalLimiter);
 
 // Configuração do Multer para upload de arquivos
-const storage = multer.diskStorage({
+// Import GCS uploader
+const { uploadToGCS } = require('./cloud-storage.js');
+
+// Configuração do Multer para upload de arquivos
+// Em produção, usamos armazenamento em memória para enviar ao GCS.
+// Em desenvolvimento, salvamos em disco para simplicidade.
+const storage = isProduction ? multer.memoryStorage() : multer.diskStorage({
     destination: function (req, file, cb) {
         const uploadDir = path.join(__dirname, 'uploads');
         if (!fs.existsSync(uploadDir)) {
@@ -332,20 +203,18 @@ const storage = multer.diskStorage({
         cb(null, uploadDir);
     },
     filename: function (req, file, cb) {
-        // Gerar nome único para o arquivo
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
         const ext = path.extname(file.originalname);
         cb(null, 'profile-' + req.user.id + '-' + uniqueSuffix + ext);
     }
 });
 
-const upload = multer({ 
+const upload = multer({
     storage: storage,
     limits: {
         fileSize: 5 * 1024 * 1024 // 5MB máximo
     },
     fileFilter: function (req, file, cb) {
-        // Verificar se o arquivo é uma imagem
         if (file.mimetype.startsWith('image/')) {
             cb(null, true);
         } else {
@@ -354,16 +223,10 @@ const upload = multer({
     }
 });
 
-// Servir arquivos de upload estaticamente
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
-// Rate limiting específico para login
-const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 5,
-    message: { error: 'Muitas tentativas de login. Por favor, tente novamente em 15 minutos.' },
-    skipSuccessfulRequests: true
-});
+// Servir arquivos de upload estaticamente (apenas para desenvolvimento)
+if (!isProduction) {
+    app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+}
 
 // Verificar variáveis de ambiente críticas
 const requiredEnvVars = ['JWT_SECRET', 'SESSION_SECRET'];
@@ -374,448 +237,25 @@ if (missingEnvVars.length > 0) {
     process.exit(1);
 }
 
-// Funções utilitárias para interagir com o banco de dados usando Promises
-const dbGet = (sql, params = []) => new Promise((resolve, reject) => db.get(sql, params, (err, row) => err ? reject(err) : resolve(row)));
-const dbAll = (sql, params = []) => new Promise((resolve, reject) => db.all(sql, params, (err, rows) => err ? reject(err) : resolve(rows)));
-const dbRun = (sql, params = []) => new Promise((resolve, reject) => db.run(sql, params, function(err) { err ? reject(err) : resolve(this) }));
-
-// --- ROTAS DE AUTENTICAÇÃO E USUÁRIO ---
-
-// Rota para registrar um novo usuário
-// LEGACY AUTH ROUTES - COMMENTED OUT (Now using modular /auth routes)
-/*
-app.post('/register', 
-    validators.email,
-    validators.password,
-    body('name').optional().isString().isLength({ max: 100 }).withMessage('Nome muito longo'),
-    handleValidationErrors,
-    async (req, res) => {
-        const { email, password, name } = req.body;
-        try {
-            const hashedPassword = await bcrypt.hash(password, 12);
-            const now = new Date().toISOString();
-            await dbRun('INSERT INTO users (email, password_hash, name, created_at) VALUES (?,?,?,?)', [email, hashedPassword, name || null, now]);
-            res.status(201).json({ "message": "Usuário criado com sucesso!" });
-        } catch (error) {
-            if (error.message.includes('UNIQUE constraint failed')) {
-                res.status(400).json({ error: "Este e-mail já está em uso." });
-            } else {
-                console.error('Erro no registro:', error);
-                res.status(500).json({ error: "Erro ao criar usuário." });
-            }
-        }
-    }
-);
-*/
-
 // ============================================================================
-// MODULAR ROUTES - NEW ARCHITECTURE
+// ARQUITETURA DE ROTAS MODULAR
 // ============================================================================
 
-// Import modular routes
+// Importar rotas modulares
 const planRoutes = require('./src/routes/planRoutes');
 const authRoutes = require('./src/routes/authRoutes');
 const userRoutes = require('./src/routes/userRoutes');
 const scheduleRoutes = require('./src/routes/scheduleRoutes');
 
-// Use modular routes
+// Utilizar rotas modulares
 app.use('/plans', planRoutes);
 app.use('/auth', authRoutes);
 app.use('/users', userRoutes);
 app.use('/schedules', scheduleRoutes);
 
 // ============================================================================
-// LEGACY ROUTES - TO BE REFACTORED
+// ROTAS LEGADAS (A SEREM REATORADAS OU REMOVIDAS)
 // ============================================================================
-
-/*
-// Rota para login de usuário
-app.post('/login', 
-    loginLimiter,
-    validators.email,
-    validators.password,
-    handleValidationErrors,
-    async (req, res) => {
-        const { email, password } = req.body;
-        try {
-            const user = await dbGet('SELECT * FROM users WHERE email = ?', [email]);
-            if (!user) {
-                return res.status(401).json({ "error": "E-mail ou senha inválidos." });
-            }
-            
-            // Check if user is a Google OAuth user
-            if (user.auth_provider === 'google') {
-                return res.status(401).json({ 
-                    "error": "Esta conta foi criada com Google. Use o botão 'Entrar com Google' para fazer login." 
-                });
-            }
-            
-            if (!await bcrypt.compare(password, user.password_hash)) {
-                return res.status(401).json({ "error": "E-mail ou senha inválidos." });
-            }
-            
-            const token = jwt.sign(
-                { id: user.id, email: user.email }, 
-                process.env.JWT_SECRET, 
-                { expiresIn: '24h', issuer: 'editaliza' }
-            );
-            
-            req.session.userId = user.id;
-            req.session.loginTime = new Date();
-            
-            res.json({ "message": "Login bem-sucedido!", "token": token });
-        } catch (error) {
-            console.error('Erro no login:', error);
-            res.status(500).json({ "error": "Erro no servidor." });
-        }
-    }
-);
-*/
-
-/*
-// Google OAuth Routes
-// Route to start Google OAuth
-app.get('/auth/google',
-    passport.authenticate('google', { scope: ['profile', 'email'] })
-);
-
-// Google OAuth callback route
-app.get('/auth/google/callback',
-    passport.authenticate('google', { failureRedirect: '/login.html?error=oauth_failed' }),
-    async (req, res) => {
-        try {
-            // Generate JWT token for the authenticated user
-            const token = jwt.sign(
-                { id: req.user.id, email: req.user.email },
-                process.env.JWT_SECRET,
-                { expiresIn: '24h', issuer: 'editaliza' }
-            );
-            
-            // Set session data
-            req.session.userId = req.user.id;
-            req.session.loginTime = new Date();
-            
-            // Redirect to frontend with token in URL fragment (more secure than query param)
-            res.redirect(`/home.html?auth_success=1&token=${encodeURIComponent(token)}`);
-        } catch (error) {
-            console.error('Google OAuth callback error:', error);
-            res.redirect('/login.html?error=oauth_callback_failed');
-        }
-    }
-);
-
-// Route to check Google OAuth status (for debugging)
-app.get('/auth/google/status', authenticateToken, (req, res) => {
-    res.json({
-        authenticated: true,
-        user: {
-            id: req.user.id,
-            email: req.user.email,
-            name: req.user.name,
-            auth_provider: req.user.auth_provider
-        }
-    });
-});
-*/
-
-/*
-// Rota para logout
-app.post('/logout', authenticateToken, (req, res) => {
-    req.session.destroy((err) => {
-        if (err) {
-            return res.status(500).json({ error: 'Erro ao fazer logout' });
-        }
-        res.json({ message: 'Logout realizado com sucesso' });
-    });
-});
-
-// Rota para solicitar redefinição de senha
-app.post('/request-password-reset',
-    validators.email,
-    handleValidationErrors,
-    async (req, res) => {
-        const { email } = req.body;
-        try {
-            const user = await dbGet('SELECT * FROM users WHERE email = ?', [email]);
-            if (user) {
-                // Check if user is a Google OAuth user
-                if (user.auth_provider === 'google') {
-                    return res.status(400).json({ 
-                        error: "Esta conta foi criada com Google. Use o botão 'Entrar com Google' para fazer login." 
-                    });
-                }
-                
-                const token = crypto.randomBytes(32).toString('hex');
-                const expires = Date.now() + 3600000; // 1 hora
-                await dbRun('UPDATE users SET reset_token = ?, reset_token_expires = ? WHERE id = ?', [token, expires, user.id]);
-                console.log(`SIMULAÇÃO DE E-MAIL: Link de recuperação para ${user.email}: http://localhost:3000/reset-password.html?token=${token}`);
-            }
-            res.json({ message: "Se um usuário com este e-mail existir, um link de recuperação foi enviado." });
-        } catch (error) {
-            console.error('Erro na recuperação de senha:', error);
-            res.status(500).json({ "error": "Erro no servidor ao processar a solicitação." });
-        }
-    }
-);
-
-// Rota para redefinir a senha com um token
-app.post('/reset-password',
-    body('token').isLength({ min: 32, max: 64 }).withMessage('Token inválido'),
-    validators.password,
-    handleValidationErrors,
-    async (req, res) => {
-        const { token, password } = req.body;
-        try {
-            const user = await dbGet('SELECT * FROM users WHERE reset_token = ? AND reset_token_expires > ?', [token, Date.now()]);
-            if (!user) {
-                return res.status(400).json({ error: "Token inválido ou expirado." });
-            }
-            const hashedPassword = await bcrypt.hash(password, 12);
-            await dbRun('UPDATE users SET password_hash = ?, reset_token = NULL, reset_token_expires = NULL WHERE id = ?', [hashedPassword, user.id]);
-            res.json({ message: "Senha redefinida com sucesso!" });
-        } catch (error) {
-            console.error('Erro ao redefinir senha:', error);
-            res.status(500).json({ "error": "Erro no servidor ao redefinir a senha." });
-        }
-    }
-);
-*/
-
-/*
-// --- ROTAS DE PERFIL DO USUÁRIO ---
-// Rota para obter dados do perfil do usuário logado
-app.get('/profile', authenticateToken, async (req, res) => {
-    try {
-        const user = await dbGet(`SELECT 
-            id, email, name, profile_picture, phone, whatsapp, created_at,
-            state, city, birth_date, education, work_status, first_time, concursos_count,
-            difficulties, area_interest, level_desired, timeline_goal, study_hours, motivation_text,
-            google_id, auth_provider, google_avatar
-            FROM users WHERE id = ?`, [req.user.id]);
-        if (!user) {
-            return res.status(404).json({ error: "Usuário não encontrado." });
-        }
-        
-        // Parse difficulties JSON string back to array
-        let difficulties = [];
-        if (user.difficulties) {
-            try {
-                difficulties = JSON.parse(user.difficulties);
-            } catch (e) {
-                difficulties = [];
-            }
-        }
-        
-        res.json({
-            id: user.id,
-            email: user.email,
-            name: user.name,
-            profile_picture: user.profile_picture,
-            phone: user.phone,
-            whatsapp: user.whatsapp,
-            created_at: user.created_at,
-            state: user.state,
-            city: user.city,
-            birth_date: user.birth_date,
-            education: user.education,
-            work_status: user.work_status,
-            first_time: user.first_time,
-            concursos_count: user.concursos_count,
-            difficulties: difficulties,
-            area_interest: user.area_interest,
-            level_desired: user.level_desired,
-            timeline_goal: user.timeline_goal,
-            study_hours: user.study_hours,
-            motivation_text: user.motivation_text
-        });
-    } catch (error) {
-        console.error('Erro ao buscar perfil:', error);
-        res.status(500).json({ error: "Erro ao carregar perfil do usuário." });
-    }
-});
-
-// Rota para atualizar dados do perfil (completo com todos os campos)
-app.patch('/profile', 
-    authenticateToken,
-    // Basic profile validations
-    body('name').optional().isString().isLength({ min: 1, max: 100 }).withMessage('Nome deve ter entre 1 e 100 caracteres'),
-    body('profile_picture').optional().isString().isLength({ max: 500 }).withMessage('URL da foto muito longa'),
-    body('phone').optional().isString().isLength({ max: 20 }).withMessage('Telefone muito longo'),
-    body('whatsapp').optional().isString().isLength({ max: 20 }).withMessage('WhatsApp muito longo'),
-    // Extended profile validations
-    body('state').optional().isString().isLength({ max: 2 }).withMessage('Estado deve ser a sigla com 2 caracteres'),
-    body('city').optional().isString().isLength({ max: 100 }).withMessage('Cidade muito longa'),
-    body('birth_date').optional().isISO8601().withMessage('Data de nascimento inválida'),
-    body('education').optional().isString().isLength({ max: 50 }).withMessage('Escolaridade inválida'),
-    body('work_status').optional().isString().isLength({ max: 50 }).withMessage('Situação profissional inválida'),
-    body('first_time').optional().isString().isIn(['sim', 'nao']).withMessage('Primeira vez deve ser sim ou nao'),
-    body('concursos_count').optional().isString().withMessage('Contagem de concursos inválida'),
-    body('difficulties').optional().custom((value) => {
-        let parsedValue = value;
-        if (typeof value === 'string') {
-            try {
-                parsedValue = JSON.parse(value);
-            } catch (e) {
-                // Se não for um JSON válido, deixe como está para a próxima verificação
-            }
-        }
-        if (parsedValue === null || parsedValue === undefined) return true; // Allow null/undefined
-        if (Array.isArray(parsedValue)) return true; // Allow arrays
-        throw new Error('Dificuldades deve ser um array');
-    }),
-    body('area_interest').optional().isString().isLength({ max: 50 }).withMessage('Área de interesse inválida'),
-    body('level_desired').optional().isString().isLength({ max: 50 }).withMessage('Nível desejado inválido'),
-    body('timeline_goal').optional().isString().isLength({ max: 50 }).withMessage('Prazo inválido'),
-    body('study_hours').optional().isString().isLength({ max: 20 }).withMessage('Horas de estudo inválidas'),
-    body('motivation_text').optional().isString().isLength({ max: 1000 }).withMessage('Texto de motivação muito longo'),
-    handleValidationErrors,
-    async (req, res) => {
-        const { 
-            name, profile_picture, phone, whatsapp, state, city, birth_date, education,
-            work_status, first_time, concursos_count, difficulties, area_interest, 
-            level_desired, timeline_goal, study_hours, motivation_text
-        } = req.body;
-
-        console.log('DEBUG (server.js): req.body.difficulties recebido:', difficulties); // Adicionar este log
-        console.log('DEBUG (server.js): typeof req.body.difficulties:', typeof difficulties); // Adicionar este log
-        
-        try {
-            const updates = [];
-            const values = [];
-            
-            // Basic profile fields
-            if (name !== undefined) {
-                updates.push('name = ?');
-                values.push(name);
-            }
-            if (profile_picture !== undefined) {
-                updates.push('profile_picture = ?');
-                values.push(profile_picture);
-            }
-            if (phone !== undefined) {
-                updates.push('phone = ?');
-                values.push(phone);
-            }
-            if (whatsapp !== undefined) {
-                updates.push('whatsapp = ?');
-                values.push(whatsapp);
-            }
-            
-            // Extended profile fields
-            if (state !== undefined) {
-                updates.push('state = ?');
-                values.push(state);
-            }
-            if (city !== undefined) {
-                updates.push('city = ?');
-                values.push(city);
-            }
-            if (birth_date !== undefined) {
-                updates.push('birth_date = ?');
-                values.push(birth_date);
-            }
-            if (education !== undefined) {
-                updates.push('education = ?');
-                values.push(education);
-            }
-            if (work_status !== undefined) {
-                updates.push('work_status = ?');
-                values.push(work_status);
-            }
-            if (first_time !== undefined) {
-                updates.push('first_time = ?');
-                values.push(first_time);
-            }
-            if (concursos_count !== undefined) {
-                updates.push('concursos_count = ?');
-                values.push(concursos_count);
-            }
-            if (difficulties !== undefined) {
-                updates.push('difficulties = ?');
-                // Ensure difficulties is always an array or null
-                const difficultiesToStore = difficulties === null ? [] : (Array.isArray(difficulties) ? difficulties : []);
-                values.push(JSON.stringify(difficultiesToStore)); // Store as JSON string
-            }
-            if (area_interest !== undefined) {
-                updates.push('area_interest = ?');
-                values.push(area_interest);
-            }
-            if (level_desired !== undefined) {
-                updates.push('level_desired = ?');
-                values.push(level_desired);
-            }
-            if (timeline_goal !== undefined) {
-                updates.push('timeline_goal = ?');
-                values.push(timeline_goal);
-            }
-            if (study_hours !== undefined) {
-                updates.push('study_hours = ?');
-                values.push(study_hours);
-            }
-            if (motivation_text !== undefined) {
-                updates.push('motivation_text = ?');
-                values.push(motivation_text);
-            }
-            
-            if (updates.length === 0) {
-                return res.status(400).json({ error: "Nenhum campo para atualizar." });
-            }
-            
-            values.push(req.user.id);
-            const sql = `UPDATE users SET ${updates.join(', ')} WHERE id = ?`;
-            
-            await dbRun(sql, values);
-            
-            // Retornar dados atualizados com todos os campos
-            const updatedUser = await dbGet(`SELECT 
-                id, email, name, profile_picture, phone, whatsapp, created_at,
-                state, city, birth_date, education, work_status, first_time, concursos_count,
-                difficulties, area_interest, level_desired, timeline_goal, study_hours, motivation_text
-                FROM users WHERE id = ?`, [req.user.id]);
-            
-            // Parse difficulties back to array
-            let userDifficulties = [];
-            if (updatedUser.difficulties) {
-                try {
-                    userDifficulties = JSON.parse(updatedUser.difficulties);
-                } catch (e) {
-                    userDifficulties = [];
-                }
-            }
-            
-            res.json({
-                message: "Perfil atualizado com sucesso!",
-                user: {
-                    id: updatedUser.id,
-                    email: updatedUser.email,
-                    name: updatedUser.name,
-                    profile_picture: updatedUser.profile_picture,
-                    phone: updatedUser.phone,
-                    whatsapp: updatedUser.whatsapp,
-                    created_at: updatedUser.created_at,
-                    state: updatedUser.state,
-                    city: updatedUser.city,
-                    birth_date: updatedUser.birth_date,
-                    education: updatedUser.education,
-                    work_status: updatedUser.work_status,
-                    first_time: updatedUser.first_time,
-                    concursos_count: updatedUser.concursos_count,
-                    difficulties: userDifficulties,
-                    area_interest: updatedUser.area_interest,
-                    level_desired: updatedUser.level_desired,
-                    timeline_goal: updatedUser.timeline_goal,
-                    study_hours: updatedUser.study_hours,
-                    motivation_text: updatedUser.motivation_text
-                }
-            });
-        } catch (error) {
-            console.error('Erro ao atualizar perfil:', error);
-            res.status(500).json({ error: "Erro ao atualizar perfil do usuário." });
-        }
-    }
-);
-*/
-
 
 // --- ROTAS DE PLANOS (CRUD E CONFIGURAÇÕES) ---
 app.get('/plans', authenticateToken, async (req, res) => {
@@ -926,27 +366,6 @@ app.patch('/plans/:planId/settings',
         }
     }
 );
-
-// --- ROTAS DE DISCIPLINAS E TÓPICOS --- - MIGRATED TO MODULAR ARCHITECTURE
-/* LEGACY ROUTE - REPLACED BY src/routes/planRoutes.js
-app.get('/plans/:planId/subjects', 
-    authenticateToken,
-    validators.numericId('planId'),
-    handleValidationErrors,
-    async (req, res) => {
-        try {
-            const plan = await dbGet('SELECT id FROM study_plans WHERE id = ? AND user_id = ?', [req.params.planId, req.user.id]);
-            if (!plan) return res.status(404).json({ "error": "Plano não encontrado ou não autorizado." });
-            
-            const rows = await dbAll("SELECT * FROM subjects WHERE study_plan_id = ? ORDER BY id DESC", [req.params.planId]);
-            res.json(rows);
-        } catch (error) {
-            console.error('Erro ao buscar disciplinas:', error);
-            res.status(500).json({ "error": "Erro ao buscar disciplinas" });
-        }
-    }
-); 
-END LEGACY ROUTE COMMENT */
 
 app.post('/plans/:planId/subjects_with_topics', 
     authenticateToken,
@@ -1135,6 +554,7 @@ app.delete('/topics/:topicId',
             await dbRun('BEGIN TRANSACTION');
             await dbRun('DELETE FROM study_sessions WHERE topic_id = ?', [topicId]);
             await dbRun('DELETE FROM topics WHERE id = ?', [topicId]);
+            await dbRun('DELETE FROM subjects WHERE id = ?', [topicId]);
             await dbRun('COMMIT');
             res.json({ message: "Tópico e sessões associadas foram apagados com sucesso" });
         } catch (error) {
@@ -1165,7 +585,7 @@ app.post('/plans/:planId/generate',
             await dbRun('BEGIN IMMEDIATE TRANSACTION');
             
             const hoursJson = JSON.stringify(study_hours_per_day);
-            await dbRun('UPDATE study_plans SET daily_question_goal = ?, weekly_question_goal = ?, session_duration_minutes = ?, study_hours_per_day = ?, has_essay = ? WHERE id = ? AND user_id = ?', 
+            await dbRun('UPDATE study_plans SET daily_question_goal = ?, weekly_question_goal = ?, review_mode = ?, session_duration_minutes = ?, study_hours_per_day = ?, has_essay = ? WHERE id = ? AND user_id = ?', 
                 [daily_question_goal, weekly_question_goal, session_duration_minutes, hoursJson, has_essay, planId, req.user.id]);
             
             const plan = await dbGet('SELECT * FROM study_plans WHERE id = ?', [planId]);
@@ -1386,7 +806,7 @@ app.post('/plans/:planId/generate',
                             
                             addSessionToAgenda(nextSimulatedDay, { 
                                 topicId: null, 
-                                subjectName: `Simulado Direcionado - ${subjectName}`, 
+                                subjectName: `Simulado Direcionado - ${subjectName}`,
                                 topicDescription: simuladoDescription, 
                                 sessionType: 'Simulado Direcionado' 
                             });
@@ -1474,8 +894,6 @@ app.post('/plans/:planId/generate',
             
             const endTime = Date.now();
             console.timeEnd(`[PERF] Generate schedule for plan ${planId}`);
-            console.log(`[PERF] Total execution time: ${endTime - startTime}ms`);
-            console.log(`[PERF] Sessions created: ${sessionsToCreate.length}`);
             
             res.json({
                 message: `Seu mapa para a aprovação foi traçado com sucesso. 🗺️`,
@@ -1512,9 +930,9 @@ app.get('/plans/:planId/replan-preview',
             const overdueSessions = await dbAll("SELECT * FROM study_sessions WHERE study_plan_id = ? AND status = 'Pendente' AND session_date < ? ORDER BY session_date, id", [planId, todayStr]);
             
             if (overdueSessions.length === 0) {
-                return res.json({ 
+                return res.json({
                     hasOverdue: false,
-                    message: "Nenhuma tarefa atrasada encontrada." 
+                    message: "Nenhuma tarefa atrasada encontrada."
                 });
             }
 
@@ -1667,910 +1085,8 @@ app.post('/plans/:planId/replan',
             console.error("Erro ao replanejar:", error);
             res.status(500).json({ error: "Ocorreu um erro interno ao replanejar as tarefas." });
         }
-});
-
-// Verificar tarefas atrasadas - MIGRATED TO MODULAR ARCHITECTURE
-/* LEGACY ROUTE - REPLACED BY src/routes/planRoutes.js
-app.get('/plans/:planId/overdue_check', 
-    authenticateToken,
-    validators.numericId('planId'),
-    handleValidationErrors,
-    async (req, res) => {
-        try {
-            const plan = await dbGet('SELECT id FROM study_plans WHERE id = ? AND user_id = ?', [req.params.planId, req.user.id]);
-            if (!plan) return res.status(404).json({ "error": "Plano não encontrado ou não autorizado." });
-
-            const todayStr = new Date().toISOString().split('T')[0];
-            const result = await dbGet("SELECT COUNT(id) as count FROM study_sessions WHERE study_plan_id = ? AND status = 'Pendente' AND session_date < ?", [req.params.planId, todayStr]);
-            res.json(result);
-        } catch (error) {
-            console.error('Erro ao verificar tarefas atrasadas:', error);
-            res.status(500).json({ error: "Erro ao verificar tarefas atrasadas" });
-        }
-}); 
-END LEGACY ROUTE COMMENT */
-
-// Obter o cronograma de um plano - MIGRATED TO MODULAR ARCHITECTURE
-/* LEGACY ROUTE - REPLACED BY src/routes/scheduleRoutes.js
-app.get('/plans/:planId/schedule', 
-    authenticateToken,
-    validators.numericId('planId'),
-    handleValidationErrors,
-    async (req, res) => {
-        try {
-            const plan = await dbGet('SELECT id FROM study_plans WHERE id = ? AND user_id = ?', [req.params.planId, req.user.id]);
-            if (!plan) return res.status(404).json({ "error": "Plano não encontrado ou não autorizado." });
-
-            const rows = await dbAll("SELECT * FROM study_sessions WHERE study_plan_id = ? ORDER BY session_date ASC, id ASC", [req.params.planId]);
-            const groupedByDate = rows.reduce((acc, session) => {
-                const date = session.session_date;
-                if (!acc[date]) acc[date] = [];
-                acc[date].push(session);
-                return acc;
-            }, {});
-            res.json(groupedByDate);
-        } catch(err) {
-            console.error('Erro ao buscar cronograma:', err);
-            res.status(500).json({ "error": "Erro ao buscar cronograma" });
-        }
-});
-END LEGACY ROUTE COMMENT */
-
-// Obter preview do status do cronograma (dados reais do usuário) - MIGRATED TO MODULAR ARCHITECTURE
-
-
-// Atualizar status de múltiplas sessões - MIGRATED TO MODULAR ARCHITECTURE
-/* LEGACY ROUTE - REPLACED BY src/routes/scheduleRoutes.js
-app.patch('/sessions/batch_update_status', 
-    authenticateToken,
-    body('sessions').isArray().withMessage('O corpo deve conter um array de sessões'),
-    body('sessions.*.id').isInt().withMessage('ID da sessão inválido'),
-    body('sessions.*.status').isIn(['Pendente', 'Concluído']).withMessage('Status inválido'),
-    handleValidationErrors,
-    async (req, res) => {
-        const { sessions } = req.body;
-        const userId = req.user.id;
-
-        try {
-            await dbRun('BEGIN TRANSACTION');
-            
-            const stmt = db.prepare(`
-                UPDATE study_sessions 
-                SET status = ? 
-                WHERE id = ? AND EXISTS (
-                    SELECT 1 FROM study_plans
-                    WHERE study_plans.id = study_sessions.study_plan_id
-                    AND study_plans.user_id = ?
-                )
-            `);
-
-            for (const session of sessions) {
-                const sessionId = parseInt(session.id, 10);
-                if (isNaN(sessionId)) continue;
-
-                await new Promise((resolve, reject) => {
-                    stmt.run(session.status, sessionId, userId, function(err) {
-                        if (err) return reject(err);
-                        if (this.changes === 0) {
-                            console.warn(`Sessão ${sessionId} não encontrada ou não autorizada para o usuário ${userId}.`);
-                        }
-                        resolve();
-                    });
-                });
-            }
-            
-            await new Promise((resolve, reject) => stmt.finalize(err => err ? reject(err) : resolve()));
-            await dbRun('COMMIT');
-            
-            res.json({ message: "Missão Cumprida! Seu cérebro agradece. 💪" });
-
-        } catch (error) {
-            await dbRun('ROLLBACK');
-            console.error("ERRO no /sessions/batch_update_status:", error);
-            res.status(500).json({ "error": "Ocorreu um erro no servidor ao atualizar as sessões." });
-        }
-});
-END LEGACY ROUTE COMMENT */
-
-// Agendar uma sessão de reforço - MIGRATED TO MODULAR ARCHITECTURE
-/* LEGACY ROUTE - REPLACED BY src/routes/scheduleRoutes.js
-app.post('/sessions/:sessionId/reinforce', 
-    authenticateToken,
-    validators.numericId('sessionId'),
-    handleValidationErrors,
-    async (req, res) => {
-        const sessionId = req.params.sessionId;
-        try {
-            const session = await dbGet('SELECT ss.* FROM study_sessions ss JOIN study_plans sp ON ss.study_plan_id = sp.id WHERE ss.id = ? AND sp.user_id = ?', [sessionId, req.user.id]);
-            if (!session || !session.topic_id) return res.status(404).json({ error: "Sessão original não encontrada ou não é um tópico estudável." });
-            
-            const reinforceDate = new Date();
-            reinforceDate.setDate(reinforceDate.getDate() + 3);
-            const reinforceDateStr = reinforceDate.toISOString().split('T')[0];
-            
-            const sql = 'INSERT INTO study_sessions (study_plan_id, topic_id, subject_name, topic_description, session_date, session_type, status) VALUES (?, ?, ?, ?, ?, ?, ?)';
-            await dbRun(sql, [session.study_plan_id, session.topic_id, session.subject_name, session.topic_description, reinforceDateStr, 'Reforço Extra', 'Pendente']);
-            
-            res.status(201).json({ message: `Sessão de reforço agendada para ${reinforceDate.toLocaleDateString('pt-BR')}!` });
-        } catch (error) {
-            console.error('Erro ao agendar reforço:', error);
-            res.status(500).json({ error: "Erro ao agendar a sessão de reforço." });
-        }
-});
-END LEGACY ROUTE COMMENT */
-
-// Adiar uma sessão de estudo - MIGRATED TO MODULAR ARCHITECTURE
-/* LEGACY ROUTE - REPLACED BY src/routes/scheduleRoutes.js
-app.patch('/sessions/:sessionId/postpone', 
-    authenticateToken,
-    validators.numericId('sessionId'),
-    body('days').custom((value) => {
-        return value === 'next' || (Number.isInteger(Number(value)) && Number(value) > 0 && Number(value) <= 30);
-    }).withMessage('Número de dias inválido'),
-    handleValidationErrors,
-    async (req, res) => {
-        const { days } = req.body;
-        const sessionId = req.params.sessionId;
-
-        try {
-            const session = await dbGet('SELECT * FROM study_sessions WHERE id = ?', [sessionId]);
-            if (!session) return res.status(404).json({ error: "Sessão não encontrada." });
-
-            const plan = await dbGet('SELECT * FROM study_plans WHERE id = ? AND user_id = ?', [session.study_plan_id, req.user.id]);
-            if (!plan) return res.status(403).json({ error: "Não autorizado." });
-
-            const studyHoursPerDay = JSON.parse(plan.study_hours_per_day);
-            const examDate = new Date(plan.exam_date + 'T23:59:59');
-
-            const findNextStudyDay = (date) => {
-                let nextDay = new Date(date);
-                while (nextDay <= examDate) {
-                    if (nextDay.getDay() !== 0 && (studyHoursPerDay[nextDay.getDay()] || 0) > 0) return nextDay;
-                    nextDay.setDate(nextDay.getDate() + 1);
-                }
-                return null;
-            };
-
-            let targetDate = new Date(session.session_date + 'T00:00:00');
-            if (days === 'next') {
-                targetDate.setDate(targetDate.getDate() + 1);
-            } else {
-                targetDate.setDate(targetDate.getDate() + parseInt(days, 10));
-            }
-
-            const newDate = findNextStudyDay(targetDate);
-
-            if (!newDate) {
-                return res.status(400).json({ error: "Não há dias de estudo disponíveis para adiar a tarefa." });
-            }
-
-            const newDateStr = newDate.toISOString().split('T')[0];
-            await dbRun("UPDATE study_sessions SET session_date = ? WHERE id = ?", [newDateStr, sessionId]);
-
-            res.json({ message: `Tarefa adiada para ${newDate.toLocaleDateString('pt-BR')}!` });
-
-        } catch (error) {
-            console.error("Erro ao adiar tarefa:", error);
-            res.status(500).json({ error: "Erro interno ao adiar a tarefa." });
-        }
-});
-END LEGACY ROUTE COMMENT */
-
-// Obter dados de progresso do plano - MIGRATED TO MODULAR ARCHITECTURE
-/* LEGACY ROUTE - REPLACED BY src/routes/planRoutes.js
-app.get('/plans/:planId/progress', 
-    authenticateToken,
-    validators.numericId('planId'),
-    handleValidationErrors,
-    async (req, res) => {
-        const planId = req.params.planId;
-        try {
-            const completedTopicsResult = await dbAll('SELECT DISTINCT topic_id FROM study_sessions WHERE study_plan_id = ? AND session_type = "Novo Tópico" AND status = "Concluído" AND topic_id IS NOT NULL', [planId]);
-            const allTopicsInPlan = await dbAll('SELECT s.subject_name, t.id FROM topics t JOIN subjects s ON t.subject_id = s.id WHERE s.study_plan_id = ?', [planId]);
-            
-            if (allTopicsInPlan.length === 0) return res.json({ totalProgress: 0, subjectProgress: {} });
-
-            const completedTopics = new Set(completedTopicsResult.map(r => r.topic_id));
-            const totalProgress = (completedTopics.size / allTopicsInPlan.length) * 100;
-            
-            const subjectStats = {};
-            allTopicsInPlan.forEach(topic => {
-                if (!subjectStats[topic.subject_name]) {
-                    subjectStats[topic.subject_name] = { total: 0, completed: 0 };
-                }
-                subjectStats[topic.subject_name].total++;
-                if (completedTopics.has(topic.id)) {
-                    subjectStats[topic.subject_name].completed++;
-                }
-            });
-            
-            const subjectProgress = {};
-            for (const subject in subjectStats) {
-                const stats = subjectStats[subject];
-                subjectProgress[subject] = stats.total > 0 ? (stats.completed / stats.total) * 100 : 0;
-            }
-            res.json({ totalProgress, subjectProgress });
-        } catch (error) {
-            console.error('Erro ao calcular progresso:', error);
-            res.status(500).json({ "error": "Erro ao calcular progresso" });
-        }
-}); 
-END LEGACY ROUTE COMMENT */
-
-// Obter progresso das metas de questões - MIGRATED TO MODULAR ARCHITECTURE
-/* LEGACY ROUTE - REPLACED BY src/routes/planRoutes.js
-app.get('/plans/:planId/goal_progress', 
-    authenticateToken,
-    validators.numericId('planId'),
-    handleValidationErrors,
-    async (req, res) => {
-        const planId = req.params.planId;
-        const today = new Date().toISOString().split('T')[0];
-        const dayOfWeek = new Date().getDay();
-        const firstDayOfWeek = new Date();
-        firstDayOfWeek.setDate(firstDayOfWeek.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
-        const firstDayOfWeekStr = firstDayOfWeek.toISOString().split('T')[0];
-        try {
-            const plan = await dbGet('SELECT daily_question_goal, weekly_question_goal FROM study_plans WHERE id = ?', [planId]);
-            if (!plan) return res.status(404).json({ error: "Plano não encontrado" });
-            const dailyResult = await dbGet('SELECT SUM(questions_solved) as total FROM study_sessions WHERE study_plan_id = ? AND session_date = ?', [planId, today]);
-            const weeklyResult = await dbGet('SELECT SUM(questions_solved) as total FROM study_sessions WHERE study_plan_id = ? AND session_date >= ? AND session_date <= ?', [planId, firstDayOfWeekStr, today]);
-            res.json({
-                dailyGoal: plan.daily_question_goal,
-                dailyProgress: dailyResult.total || 0,
-                weeklyGoal: plan.weekly_question_goal,
-                weeklyProgress: weeklyResult.total || 0
-            });
-        } catch (error) {
-            console.error('Erro ao buscar progresso de metas:', error);
-            res.status(500).json({ error: "Erro ao buscar progresso de metas" });
-        }
-}); 
-END LEGACY ROUTE COMMENT */
-
-// Obter radar de questões (pontos fracos) - MIGRATED TO MODULAR ARCHITECTURE
-/* LEGACY ROUTE - REPLACED BY src/routes/planRoutes.js
-app.get('/plans/:planId/question_radar', 
-    authenticateToken,
-    validators.numericId('planId'),
-    handleValidationErrors,
-    async (req, res) => {
-        const todayStr = new Date().toISOString().split('T')[0];
-        const sql = `
-            SELECT t.description as topic_description, s.subject_name, COALESCE(SUM(ss.questions_solved), 0) as total_questions
-            FROM topics t
-            JOIN subjects s ON t.subject_id = s.id
-            LEFT JOIN study_sessions ss ON t.id = ss.topic_id AND s.study_plan_id = ss.study_plan_id
-            WHERE s.study_plan_id = ? 
-              AND t.id IN (SELECT DISTINCT topic_id FROM study_sessions WHERE study_plan_id = ? AND session_date <= ? AND topic_id IS NOT NULL)
-            GROUP BY t.id
-            HAVING total_questions < 10
-            ORDER BY total_questions ASC, s.subject_name
-        `;
-        try {
-            const rows = await dbAll(sql, [req.params.planId, req.params.planId, todayStr]);
-            res.json(rows);
-        } catch (error) {
-            console.error('Erro ao buscar radar de questões:', error);
-            res.status(500).json({ "error": "Erro ao buscar radar de questões" });
-        }
-}); 
-END LEGACY ROUTE COMMENT */
-
-// Obter dados para revisão
-app.get('/plans/:planId/review_data', 
-    authenticateToken,
-    validators.numericId('planId'),
-    query('date').isISO8601().withMessage('Data inválida'),
-    query('type').isIn(['semanal', 'mensal']).withMessage('Tipo de revisão inválido'),
-    handleValidationErrors,
-    async (req, res) => {
-        const { date, type } = req.query;
-        const planId = req.params.planId;
-        try {
-            const plan = await dbGet('SELECT review_mode FROM study_plans WHERE id = ?', [planId]);
-            if (!plan) return res.status(404).json({ error: "Plano não encontrado" });
-            const reviewDate = new Date(date + 'T00:00:00');
-            const daysToLookBack = type === 'mensal' ? 28 : 7;
-            const startDate = new Date(reviewDate);
-            startDate.setDate(reviewDate.getDate() - (daysToLookBack - 1));
-            const reviewDateStr = reviewDate.toISOString().split('T')[0];
-            const startDateStr = startDate.toISOString().split('T')[0];
-            let sql = `
-                SELECT DISTINCT s.subject_name, ss.topic_description, ss.topic_id
-                FROM study_sessions ss
-                JOIN topics t ON ss.topic_id = t.id
-                JOIN subjects s ON t.subject_id = s.id
-                WHERE ss.study_plan_id = ? 
-                  AND ss.session_type = 'Novo Tópico'
-                  AND ss.session_date >= ? AND ss.session_date <= ?
-            `;
-            let params = [planId, startDateStr, reviewDateStr];
-            if (plan.review_mode === 'focado') {
-                sql += ` AND (SELECT COALESCE(SUM(questions_solved), 0) FROM study_sessions WHERE topic_id = ss.topic_id AND study_plan_id = ?) < 10`;
-                params.push(planId);
-            }
-            sql += ` ORDER BY s.subject_name, ss.topic_description`;
-            const rows = await dbAll(sql, params);
-            const groupedBySubject = rows.reduce((acc, row) => {
-                if (!acc[row.subject_name]) acc[row.subject_name] = [];
-                acc[row.subject_name].push(row.topic_description);
-                return acc;
-            }, {});
-            res.json(groupedBySubject);
-        } catch (error) {
-            console.error('Erro ao buscar dados de revisão:', error);
-            res.status(500).json({ error: "Erro ao buscar dados de revisão" });
-        }
-});
-
-// Obter progresso detalhado - MIGRATED TO MODULAR ARCHITECTURE
-/* LEGACY ROUTE - REPLACED BY src/routes/planRoutes.js
-app.get('/plans/:planId/detailed_progress',
-    authenticateToken,
-    validators.numericId('planId'),
-    handleValidationErrors,
-    async (req, res) => {
-        const planId = req.params.planId;
-        const userId = req.user.id;
-        try {
-            const plan = await dbGet('SELECT id FROM study_plans WHERE id = ? AND user_id = ?', [planId, userId]);
-            if (!plan) return res.status(404).json({ "error": "Plano não encontrado ou não autorizado." });
-
-            // Obter dados básicos de tópicos e disciplinas
-            const subjects = await dbAll('SELECT id, subject_name FROM subjects WHERE study_plan_id = ?', [planId]);
-            
-            // CORREÇÃO: Query melhorada para capturar tempo de estudo de sessões concluídas
-            const topics = await dbAll(`
-                SELECT 
-                    t.id, t.description, t.status, t.subject_id, 
-                    COALESCE(ss.total_time, 0) as time_studied 
-                FROM topics t 
-                LEFT JOIN (
-                    SELECT 
-                        topic_id, 
-                        SUM(COALESCE(time_studied_seconds, 0)) as total_time 
-                    FROM study_sessions 
-                    WHERE study_plan_id = ? 
-                        AND topic_id IS NOT NULL
-                        AND status = 'Concluído'
-                        AND time_studied_seconds > 0
-                    GROUP BY topic_id
-                ) ss ON t.id = ss.topic_id 
-                WHERE t.subject_id IN (SELECT id FROM subjects WHERE study_plan_id = ?)
-            `, [planId, planId]);
-            
-            // CORREÇÃO: Também capturar tempo de estudo de sessões por disciplina que não têm topic_id
-            const subjectStudyTime = await dbAll(`
-                SELECT 
-                    s.id as subject_id,
-                    s.subject_name,
-                    COALESCE(SUM(ss.time_studied_seconds), 0) as additional_time
-                FROM subjects s
-                LEFT JOIN study_sessions ss ON s.subject_name = ss.subject_name
-                WHERE s.study_plan_id = ? 
-                    AND ss.study_plan_id = ?
-                    AND ss.status = 'Concluído'
-                    AND ss.time_studied_seconds > 0
-                    AND (ss.topic_id IS NULL OR ss.topic_id = '')
-                GROUP BY s.id, s.subject_name
-            `, [planId, planId]);
-
-            // Calcular estatísticas de atividades
-            const activityStats = await dbAll(`
-                SELECT 
-                    session_type,
-                    COUNT(*) as total_sessions,
-                    SUM(CASE WHEN status = 'Concluído' THEN 1 ELSE 0 END) as completed_sessions,
-                    SUM(COALESCE(time_studied_seconds, 0)) as total_time_seconds
-                FROM study_sessions 
-                WHERE study_plan_id = ?
-                GROUP BY session_type
-            `, [planId]);
-
-            // Organizar estatísticas por tipo de atividade
-            const activityBreakdown = {
-                revisoes_7d: { completed: 0, total: 0, timeSpent: 0 },
-                revisoes_14d: { completed: 0, total: 0, timeSpent: 0 },
-                revisoes_28d: { completed: 0, total: 0, timeSpent: 0 },
-                simulados_direcionados: { completed: 0, total: 0, timeSpent: 0 },
-                simulados_completos: { completed: 0, total: 0, timeSpent: 0 },
-                redacoes: { completed: 0, total: 0, timeSpent: 0 },
-                novos_topicos: { completed: 0, total: 0, timeSpent: 0 }
-            };
-
-            activityStats.forEach(stat => {
-                const sessionType = stat.session_type;
-                if (sessionType === 'Revisão 7D') {
-                    activityBreakdown.revisoes_7d = {
-                        completed: stat.completed_sessions,
-                        total: stat.total_sessions,
-                        timeSpent: stat.total_time_seconds
-                    };
-                } else if (sessionType === 'Revisão 14D') {
-                    activityBreakdown.revisoes_14d = {
-                        completed: stat.completed_sessions,
-                        total: stat.total_sessions,
-                        timeSpent: stat.total_time_seconds
-                    };
-                } else if (sessionType === 'Revisão 28D') {
-                    activityBreakdown.revisoes_28d = {
-                        completed: stat.completed_sessions,
-                        total: stat.total_sessions,
-                        timeSpent: stat.total_time_seconds
-                    };
-                } else if (sessionType === 'Simulado Direcionado') {
-                    activityBreakdown.simulados_direcionados = {
-                        completed: stat.completed_sessions,
-                        total: stat.total_sessions,
-                        timeSpent: stat.total_time_seconds
-                    };
-                } else if (sessionType === 'Simulado Completo') {
-                    activityBreakdown.simulados_completos = {
-                        completed: stat.completed_sessions,
-                        total: stat.total_sessions,
-                        timeSpent: stat.total_time_seconds
-                    };
-                } else if (sessionType === 'Redação') {
-                    activityBreakdown.redacoes = {
-                        completed: stat.completed_sessions,
-                        total: stat.total_sessions,
-                        timeSpent: stat.total_time_seconds
-                    };
-                } else if (sessionType === 'Novo Tópico') {
-                    activityBreakdown.novos_topicos = {
-                        completed: stat.completed_sessions,
-                        total: stat.total_sessions,
-                        timeSpent: stat.total_time_seconds
-                    };
-                }
-            });
-
-            // Calcular tempo total de revisões vs conteúdo novo
-            const totalReviewTime = activityBreakdown.revisoes_7d.timeSpent + 
-                                   activityBreakdown.revisoes_14d.timeSpent + 
-                                   activityBreakdown.revisoes_28d.timeSpent;
-            const totalNewContentTime = activityBreakdown.novos_topicos.timeSpent;
-            const totalStudyTime = totalReviewTime + totalNewContentTime;
-
-            // CORREÇÃO: Melhorar cálculo de tempo total por disciplina incluindo tempo adicional
-            const subjectData = subjects.map(subject => {
-                const subjectTopics = topics.filter(t => t.subject_id === subject.id);
-                const completedTopics = subjectTopics.filter(t => t.status === 'Concluído').length;
-                
-                // Tempo dos tópicos específicos
-                const topicsTime = subjectTopics.reduce((sum, t) => sum + t.time_studied, 0);
-                
-                // Tempo adicional de sessões da disciplina sem topic_id específico
-                const additionalTime = subjectStudyTime.find(st => st.subject_id === subject.id)?.additional_time || 0;
-                
-                // Tempo total = tempo dos tópicos + tempo adicional da disciplina
-                const totalTime = topicsTime + additionalTime;
-                
-                console.log(`📊 Disciplina ${subject.subject_name}: tópicos=${topicsTime}s, adicional=${additionalTime}s, total=${totalTime}s`);
-
-                return {
-                    id: subject.id,
-                    name: subject.subject_name,
-                    progress: subjectTopics.length > 0 ? (completedTopics / subjectTopics.length) * 100 : 0,
-                    totalTime: totalTime, // Tempo total corrigido
-                    topics: subjectTopics.map(t => ({
-                        id: t.id,
-                        description: t.description,
-                        status: t.status,
-                        timeStudied: t.time_studied
-                    }))
-                };
-            });
-
-            const totalTopicsInPlan = topics.length;
-            const totalCompletedTopics = topics.filter(t => t.status === 'Concluído').length;
-            const totalProgress = totalTopicsInPlan > 0 ? (totalCompletedTopics / totalTopicsInPlan) * 100 : 0;
-
-            res.json({
-                totalProgress,
-                subjectDetails: subjectData,
-                activityStats: {
-                    revisoes_7d: {
-                        completed: activityBreakdown.revisoes_7d.completed,
-                        total: activityBreakdown.revisoes_7d.total,
-                        completionRate: activityBreakdown.revisoes_7d.total > 0 ? 
-                            (activityBreakdown.revisoes_7d.completed / activityBreakdown.revisoes_7d.total * 100).toFixed(1) : 0,
-                        timeSpent: activityBreakdown.revisoes_7d.timeSpent
-                    },
-                    revisoes_14d: {
-                        completed: activityBreakdown.revisoes_14d.completed,
-                        total: activityBreakdown.revisoes_14d.total,
-                        completionRate: activityBreakdown.revisoes_14d.total > 0 ? 
-                            (activityBreakdown.revisoes_14d.completed / activityBreakdown.revisoes_14d.total * 100).toFixed(1) : 0,
-                        timeSpent: activityBreakdown.revisoes_14d.timeSpent
-                    },
-                    revisoes_28d: {
-                        completed: activityBreakdown.revisoes_28d.completed,
-                        total: activityBreakdown.revisoes_28d.total,
-                        completionRate: activityBreakdown.revisoes_28d.total > 0 ? 
-                            (activityBreakdown.revisoes_28d.completed / activityBreakdown.revisoes_28d.total * 100).toFixed(1) : 0,
-                        timeSpent: activityBreakdown.revisoes_28d.timeSpent
-                    },
-                    simulados_direcionados: {
-                        completed: activityBreakdown.simulados_direcionados.completed,
-                        total: activityBreakdown.simulados_direcionados.total,
-                        completionRate: activityBreakdown.simulados_direcionados.total > 0 ? 
-                            (activityBreakdown.simulados_direcionados.completed / activityBreakdown.simulados_direcionados.total * 100).toFixed(1) : 0,
-                        timeSpent: activityBreakdown.simulados_direcionados.timeSpent
-                    },
-                    simulados_completos: {
-                        completed: activityBreakdown.simulados_completos.completed,
-                        total: activityBreakdown.simulados_completos.total,
-                        completionRate: activityBreakdown.simulados_completos.total > 0 ? 
-                            (activityBreakdown.simulados_completos.completed / activityBreakdown.simulados_completos.total * 100).toFixed(1) : 0,
-                        timeSpent: activityBreakdown.simulados_completos.timeSpent
-                    },
-                    redacoes: {
-                        completed: activityBreakdown.redacoes.completed,
-                        total: activityBreakdown.redacoes.total,
-                        completionRate: activityBreakdown.redacoes.total > 0 ? 
-                            (activityBreakdown.redacoes.completed / activityBreakdown.redacoes.total * 100).toFixed(1) : 0,
-                        timeSpent: activityBreakdown.redacoes.timeSpent
-                    },
-                    novos_topicos: {
-                        completed: activityBreakdown.novos_topicos.completed,
-                        total: activityBreakdown.novos_topicos.total,
-                        completionRate: activityBreakdown.novos_topicos.total > 0 ? 
-                            (activityBreakdown.novos_topicos.completed / activityBreakdown.novos_topicos.total * 100).toFixed(1) : 0,
-                        timeSpent: activityBreakdown.novos_topicos.timeSpent
-                    }
-                },
-                timeBreakdown: {
-                    totalReviewTime: totalReviewTime,
-                    totalNewContentTime: totalNewContentTime,
-                    totalStudyTime: totalStudyTime,
-                    reviewPercentage: totalStudyTime > 0 ? (totalReviewTime / totalStudyTime * 100).toFixed(1) : 0,
-                    newContentPercentage: totalStudyTime > 0 ? (totalNewContentTime / totalStudyTime * 100).toFixed(1) : 0
-                }
-            });
-
-        } catch (error) {
-            console.error('Erro ao buscar progresso detalhado:', error);
-            res.status(500).json({ "error": "Erro ao buscar progresso detalhado" });
-        }
     }
-); 
-END LEGACY ROUTE COMMENT */
-
-// Obter estatísticas resumidas de atividades - MIGRATED TO MODULAR ARCHITECTURE
-/* LEGACY ROUTE - REPLACED BY src/routes/planRoutes.js
-app.get('/plans/:planId/activity_summary',
-    authenticateToken,
-    validators.numericId('planId'),
-    handleValidationErrors,
-    async (req, res) => {
-        const planId = req.params.planId;
-        const userId = req.user.id;
-        try {
-            const plan = await dbGet('SELECT id FROM study_plans WHERE id = ? AND user_id = ?', [planId, userId]);
-            if (!plan) return res.status(404).json({ "error": "Plano não encontrado ou não autorizado." });
-
-            // Obter estatísticas de atividades concluídas
-            const activityStats = await dbAll(`
-                SELECT 
-                    session_type,
-                    COUNT(*) as total,
-                    SUM(CASE WHEN status = 'Concluído' THEN 1 ELSE 0 END) as completed
-                FROM study_sessions 
-                WHERE study_plan_id = ?
-                GROUP BY session_type
-            `, [planId]);
-
-            const summary = {
-                revisoes_7d_completed: 0,
-                revisoes_14d_completed: 0,
-                revisoes_28d_completed: 0,
-                simulados_direcionados_completed: 0,
-                simulados_completos_completed: 0,
-                redacoes_completed: 0,
-                novos_topicos_completed: 0,
-                total_revisoes_completed: 0
-            };
-
-            activityStats.forEach(stat => {
-                const sessionType = stat.session_type;
-                const completed = stat.completed || 0;
-                
-                if (sessionType === 'Revisão 7D') {
-                    summary.revisoes_7d_completed = completed;
-                    summary.total_revisoes_completed += completed;
-                } else if (sessionType === 'Revisão 14D') {
-                    summary.revisoes_14d_completed = completed;
-                    summary.total_revisoes_completed += completed;
-                } else if (sessionType === 'Revisão 28D') {
-                    summary.revisoes_28d_completed = completed;
-                    summary.total_revisoes_completed += completed;
-                } else if (sessionType === 'Simulado Direcionado') {
-                    summary.simulados_direcionados_completed = completed;
-                } else if (sessionType === 'Simulado Completo') {
-                    summary.simulados_completos_completed = completed;
-                } else if (sessionType === 'Redação') {
-                    summary.redacoes_completed = completed;
-                } else if (sessionType === 'Novo Tópico') {
-                    summary.novos_topicos_completed = completed;
-                }
-            });
-
-            res.json(summary);
-
-        } catch (error) {
-            console.error('Erro ao buscar resumo de atividades:', error);
-            res.status(500).json({ "error": "Erro ao buscar resumo de atividades" });
-        }
-    }
-); 
-END LEGACY ROUTE COMMENT */
-
-// Obter diagnóstico de performance (reality check) - MIGRATED TO MODULAR ARCHITECTURE
-/* LEGACY ROUTE - REPLACED BY src/routes/planRoutes.js
-app.get('/plans/:planId/realitycheck', 
-    authenticateToken,
-    validators.numericId('planId'),
-    handleValidationErrors,
-    async (req, res) => {
-        const planId = req.params.planId;
-        try {
-            const plan = await dbGet("SELECT * FROM study_plans WHERE id = ? AND user_id = ?", [planId, req.user.id]);
-            if (!plan) return res.status(404).json({ "error": "Plano não encontrado" });
-            
-            const sessions = await dbAll("SELECT status, topic_id, session_date, session_type FROM study_sessions WHERE study_plan_id = ?", [planId]);
-            const totalTopicsResult = await dbGet('SELECT COUNT(t.id) as total FROM topics t JOIN subjects s ON t.subject_id = s.id WHERE s.study_plan_id = ?', [planId]);
-            const totalTopics = totalTopicsResult.total;
-
-            if (totalTopics === 0) {
-                return res.json({ message: "Adicione tópicos ao seu plano para ver as projeções." });
-            }
-
-            const today = new Date(); today.setHours(0, 0, 0, 0);
-            const examDate = new Date(plan.exam_date + 'T23:59:59');
-            
-            const newTopicSessions = sessions.filter(s => s.session_type === 'Novo Tópico');
-            const completedTopics = new Set(newTopicSessions.filter(s => s.status === 'Concluído').map(r => r.topic_id));
-            const topicsCompletedCount = completedTopics.size;
-            const topicsRemaining = totalTopics - topicsCompletedCount;
-
-            const futureNewTopics = newTopicSessions.filter(s => new Date(s.session_date) >= today && s.status === 'Pendente');
-            const isMaintenanceMode = totalTopics > 0 && futureNewTopics.length === 0;
-
-            const firstSessionDateResult = await dbGet("SELECT MIN(session_date) as first_date FROM study_sessions WHERE study_plan_id = ? AND session_type = 'Novo Tópico' AND status = 'Concluído'", [planId]);
-            const firstSessionDate = firstSessionDateResult.first_date ? new Date(firstSessionDateResult.first_date + 'T00:00:00') : today;
-
-            const daysSinceStart = Math.max(1, Math.ceil((today - firstSessionDate) / (1000 * 60 * 60 * 24)));
-            const daysRemainingForExam = Math.max(1, Math.ceil((examDate - today) / (1000 * 60 * 60 * 24)));
-            
-            const currentPace = topicsCompletedCount / daysSinceStart;
-            const requiredPace = topicsRemaining / daysRemainingForExam;
-
-            let status, primaryMessage, secondaryMessage, motivationalMessage;
-
-            if (isMaintenanceMode) {
-                status = 'completed';
-                primaryMessage = `Parabéns! Você concluiu <strong>100%</strong> do edital.`;
-                secondaryMessage = `Seu cronograma entrou no Modo de Manutenção Avançada, com foco em revisões e simulados.`;
-                motivationalMessage = `Agora é a hora de aprimorar. Mantenha a consistência até a aprovação!`;
-            } else {
-                let projectedCompletionPercentage = 0;
-                if (totalTopics > 0) {
-                    if (currentPace > 0) {
-                        const projectedTopicsToComplete = currentPace * daysRemainingForExam;
-                        const totalProjectedCompleted = topicsCompletedCount + projectedTopicsToComplete;
-                        projectedCompletionPercentage = Math.min(100, (totalProjectedCompleted / totalTopics) * 100);
-                    } else if (topicsCompletedCount > 0) {
-                        projectedCompletionPercentage = (topicsCompletedCount / totalTopics) * 100;
-                    }
-                }
-
-                if (currentPace >= requiredPace) {
-                    status = 'on-track';
-                    primaryMessage = `Mantendo o ritmo, sua projeção é de concluir <strong>${projectedCompletionPercentage.toFixed(0)}%</strong> do edital.`;
-                    secondaryMessage = `Excelente trabalho! Seu ritmo atual é suficiente para cobrir todo o conteúdo necessário a tempo.`;
-                    motivationalMessage = `A consistência está trazendo resultados. Continue assim!`;
-                } else {
-                    status = 'off-track';
-                    primaryMessage = `Nesse ritmo, você completará apenas <strong>${projectedCompletionPercentage.toFixed(0)}%</strong> do edital até a prova.`;
-                    secondaryMessage = `Para concluir 100%, seu ritmo precisa aumentar para <strong>${requiredPace.toFixed(1)} tópicos/dia</strong>.`;
-                    motivationalMessage = `Não desanime! Pequenos ajustes na rotina podem fazer uma grande diferença.`;
-                }
-            }
-
-            res.json({
-                requiredPace: isFinite(requiredPace) ? `${requiredPace.toFixed(1)} tópicos/dia` : "N/A",
-                postponementCount: plan.postponement_count,
-                status,
-                primaryMessage,
-                secondaryMessage,
-                motivationalMessage,
-                isMaintenanceMode
-            });
-
-        } catch (error) {
-            console.error('Erro no reality check:', error);
-            res.status(500).json({ "error": "Erro ao calcular diagnóstico" });
-        }
-});
-// Endpoint para registrar tempo de estudo
-app.post('/sessions/:sessionId/time',
-    authenticateToken,
-    validators.numericId('sessionId'),
-    body('seconds').isInt({ min: 0, max: 86400 }).withMessage('Tempo inválido'),
-    handleValidationErrors,
-    async (req, res) => {
-        const { seconds } = req.body;
-        const sessionId = req.params.sessionId;
-        const userId = req.user.id;
-
-        try {
-            const session = await dbGet(`
-                SELECT ss.* FROM study_sessions ss 
-                JOIN study_plans sp ON ss.study_plan_id = sp.id 
-                WHERE ss.id = ? AND sp.user_id = ?
-            `, [sessionId, userId]);
-
-            if (!session) {
-                return res.status(404).json({ error: "Sessão não encontrada ou não autorizada." });
-            }
-
-            await dbRun(`
-                UPDATE study_sessions 
-                SET time_studied_seconds = COALESCE(time_studied_seconds, 0) + ?
-                WHERE id = ?
-            `, [seconds, sessionId]);
-
-            res.json({ 
-                message: "Tempo registrado com sucesso!", 
-                totalTime: (session.time_studied_seconds || 0) + seconds 
-            });
-
-        } catch (error) {
-            console.error('Erro ao salvar tempo de estudo:', error);
-            res.status(500).json({ error: "Erro ao registrar tempo de estudo." });
-        }
-    }
-); 
-END LEGACY ROUTE COMMENT */
-
-// --- ROTA DE GAMIFICAÇÃO --- - MIGRATED TO MODULAR ARCHITECTURE
-/* LEGACY ROUTE - REPLACED BY src/routes/planRoutes.js
-app.get('/plans/:planId/gamification', 
-    authenticateToken,
-    validators.numericId('planId'),
-    handleValidationErrors,
-    async (req, res) => {
-        const planId = req.params.planId;
-        const userId = req.user.id;
-
-        try {
-            const plan = await dbGet("SELECT id FROM study_plans WHERE id = ? AND user_id = ?", [planId, userId]);
-            if (!plan) return res.status(404).json({ "error": "Plano não encontrado ou não autorizado." });
-
-            const completedTopicsResult = await dbGet(`
-                SELECT COUNT(DISTINCT topic_id) as count 
-                FROM study_sessions 
-                WHERE study_plan_id = ? AND session_type = 'Novo Tópico' AND status = 'Concluído' AND topic_id IS NOT NULL
-            `, [planId]);
-            const completedTopicsCount = completedTopicsResult.count || 0;
-
-            const levels = [
-                { threshold: 0, title: 'Aspirante a Servidor(a) 🌱' },
-                { threshold: 11, title: 'Pagador(a) de Inscrição 💸' },
-                { threshold: 31, title: 'Acima da Nota de Corte (nos simulados) 😉' },
-                { threshold: 51, title: 'Mestre dos Grupos de WhatsApp de Concurso 📲' },
-                { threshold: 101, title: 'Gabaritador(a) da prova de Português da FGV 🎯' },
-                { threshold: 201, title: 'Terror do Cespe/Cebraspe 👹' },
-                { threshold: 351, title: 'Veterano(a) de 7 Bancas Diferentes 😎' },
-                { threshold: 501, title: '✨ Lenda Viva: Assinante Vitalício do Diário Oficial ✨' }
-            ];
-
-            let currentLevel = levels[0];
-            let nextLevel = null;
-            for (let i = levels.length - 1; i >= 0; i--) {
-                if (completedTopicsCount >= levels[i].threshold) {
-                    currentLevel = levels[i];
-                    if (i < levels.length - 1) {
-                        nextLevel = levels[i + 1];
-                    }
-                    break;
-                }
-            }
-            
-            const topicsToNextLevel = nextLevel ? nextLevel.threshold - completedTopicsCount : 0;
-
-            const completedSessions = await dbAll(`
-                SELECT DISTINCT session_date FROM study_sessions 
-                WHERE study_plan_id = ? AND status = 'Concluído' ORDER BY session_date DESC
-            `, [planId]);
-            
-            let studyStreak = 0;
-            if (completedSessions.length > 0) {
-                const today = new Date();
-                today.setHours(0, 0, 0, 0);
-                const yesterday = new Date(today);
-                yesterday.setDate(today.getDate() - 1);
-
-                const lastStudyDate = new Date(completedSessions[0].session_date + 'T00:00:00');
-                
-                if (lastStudyDate.getTime() === today.getTime() || lastStudyDate.getTime() === yesterday.getTime()) {
-                    studyStreak = 1;
-                    let currentDate = new Date(lastStudyDate);
-                    for (let i = 1; i < completedSessions.length; i++) {
-                        const previousDay = new Date(currentDate);
-                        previousDay.setDate(currentDate.getDate() - 1);
-                        const nextStudyDate = new Date(completedSessions[i].session_date + 'T00:00:00');
-                        if (nextStudyDate.getTime() === previousDay.getTime()) {
-                            studyStreak++;
-                            currentDate = nextStudyDate;
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-            
-            const todayStr = new Date().toISOString().split('T')[0];
-            const todayTasksResult = await dbGet(`
-                SELECT 
-                    COUNT(id) as total, 
-                    SUM(CASE WHEN status = 'Concluído' THEN 1 ELSE 0 END) as completed 
-                FROM study_sessions 
-                WHERE study_plan_id = ? AND session_date = ?
-            `, [planId, todayStr]);
-
-            // Calcular experiência baseada em atividades reais
-            const allCompletedSessionsResult = await dbGet(`
-                SELECT COUNT(*) as count 
-                FROM study_sessions 
-                WHERE study_plan_id = ? AND status = 'Concluído'
-            `, [planId]);
-            const totalCompletedSessions = allCompletedSessionsResult.count || 0;
-            
-            // XP baseado em: 10 XP por sessão completada + 50 XP por tópico novo completado
-            const experiencePoints = (totalCompletedSessions * 10) + (completedTopicsCount * 50);
-            
-            // Calcular conquistas baseadas em dados reais
-            const achievements = [];
-            if (completedTopicsCount >= 1) achievements.push("🌟 Primeiro Tópico");
-            if (completedTopicsCount >= 5) achievements.push("📚 Estudioso");
-            if (completedTopicsCount >= 10) achievements.push("🎯 Focado");
-            if (studyStreak >= 3) achievements.push("🔥 Consistente");
-            if (studyStreak >= 7) achievements.push("💪 Disciplinado");
-            if (studyStreak >= 14) achievements.push("🏆 Dedicado");
-            if (totalCompletedSessions >= 20) achievements.push("📈 Persistente");
-            if (totalCompletedSessions >= 50) achievements.push("⭐ Veterano");
-            
-            // Calcular total de dias únicos com atividades (não streak, mas total)
-            const uniqueStudyDaysResult = await dbGet(`
-                SELECT COUNT(DISTINCT session_date) as count 
-                FROM study_sessions 
-                WHERE study_plan_id = ? AND status = 'Concluído'
-            `, [planId]);
-            const totalStudyDays = uniqueStudyDaysResult.count || 0;
-
-            res.json({
-                completedTopicsCount,
-                concurseiroLevel: currentLevel.title,
-                nextLevel: nextLevel ? nextLevel.title : null,
-                topicsToNextLevel,
-                studyStreak,
-                completedTodayCount: todayTasksResult.completed || 0,
-                totalTodayCount: todayTasksResult.total || 0,
-                experiencePoints,
-                achievements,
-                totalStudyDays,
-                totalCompletedSessions
-            });
-
-        } catch (error) {
-            console.error("Erro na rota de gamificação:", error);
-            res.status(500).json({ "error": "Erro ao buscar dados de gamificação." });
-        }
-}); 
-END LEGACY ROUTE COMMENT */
+);
 
 // Endpoint para gerar dados de compartilhamento
 app.get('/plans/:planId/share-progress', 
@@ -2660,12 +1176,12 @@ app.get('/plans/:planId/share-progress',
                 studyStreak: studyStreak,
                 daysToExam: daysToExam > 0 ? daysToExam : 0,
                 level: currentLevel.title,
-                shareText: `🎯 MEU PROGRESSO NO ${plan.plan_name.toUpperCase()}!\n\n` +
-                          `📚 ${completedTopicsCount} tópicos já dominados ✅\n` +
-                          `🔥 ${studyStreak} dias consecutivos de foco total!\n` +
-                          `⏰ Faltam ${daysToExam > 0 ? daysToExam : 0} dias para a prova\n` +
-                          `🏆 Status atual: ${currentLevel.title}\n\n` +
-                          `💪 A aprovação está cada vez mais próxima!\n\n` +
+                shareText: `🎯 MEU PROGRESSO NO ${plan.plan_name.toUpperCase()}!\n\n` + 
+                          `📚 ${completedTopicsCount} tópicos já dominados ✅\n` + 
+                          `🔥 ${studyStreak} dias consecutivos de foco total!\n` + 
+                          `⏰ Faltam ${daysToExam > 0 ? daysToExam : 0} dias para a prova\n` + 
+                          `🏆 Status atual: ${currentLevel.title}\n\n` + 
+                          `💪 A aprovação está cada vez mais próxima!\n\n` + 
                           `#Concursos #Estudos #Editaliza #FocoNaAprovacao #VemAprovacao`
             };
 

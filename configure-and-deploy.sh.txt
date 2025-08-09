@@ -1,0 +1,63 @@
+1 #!/bin/bash
+    2 # Script para configurar e implantar a aplicação Editaliza no Cloud Run
+    3 
+    4 set -e # Encerra o script se qualquer comando falhar
+    5 
+    6 echo ">>> Iniciando a implantação do Editaliza..."
+    7 
+    8 # --- Variáveis de Configuração ---
+    9 SERVICE_NAME="editaliza"
+   10 REGION="southamerica-east1"
+   11 GCP_PROJECT_ID=$(gcloud config get-value project)
+   12 SQL_INSTANCE_NAME="editalize:${REGION}:editaliza-db"
+   13 SQL_CONNECTION_PATH="/cloudsql/${SQL_INSTANCE_NAME}"
+   14 DB_USER="editaliza_user"
+   15 DB_NAME="editaliza_prod"
+   16 BUCKET_NAME="editaliza-avatares-123456"
+   17 
+   18 echo ">>> Corrigindo o Dockerfile..."
+   19 cat <<EOF > Dockerfile
+   20 # Multi-stage build for production optimization
+   21 # Stage 1: Build dependencies
+   22 FROM node:18-alpine AS dependencies
+   23 WORKDIR /app
+   24 RUN apk update && apk upgrade && apk add --no-cache dumb-init
+   25 COPY package*.json ./
+   26 RUN npm ci --only=production && npm cache clean --force
+   27 # Stage 2: Production image
+   28 FROM node:18-alpine AS production
+   29 RUN addgroup -S nonroot && adduser -S nonroot -G nonroot
+   30 USER nonroot
+   31 WORKDIR /app
+   32 COPY --from=dependencies /app/node_modules ./node_modules
+   33 COPY package*.json ./
+   34 COPY server.js ./
+   35 COPY middleware.js ./
+   36 COPY database.js ./
+   37 COPY database-cloud.js ./
+   38 COPY cloud-storage.js ./
+   39 COPY src/ ./src/
+   40 COPY *.html ./
+   41 COPY css/ ./css/
+   42 COPY js/ ./js/
+   43 COPY images/ ./images/
+   44 ENV NODE_ENV=production
+   45 ENV PORT=8080
+   46 EXPOSE 8080
+   47 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+   48 CMD ["node", "server.js"]
+   49 EOF
+   50 echo ">>> Dockerfile corrigido com sucesso."
+   51
+   52 echo ">>> Iniciando a implantação no Cloud Run..."
+   53 gcloud run deploy "${SERVICE_NAME}" \
+   54   --source . \
+   55   --platform "managed" \
+   56   --region "${REGION}" \
+   57   --allow-unauthenticated \
+   58   --add-cloudsql-instances "${SQL_INSTANCE_NAME}" \
+   59   --set-env-vars="DB_HOST=${SQL_CONNECTION_PATH},DB_USER=${DB_USER},DB_DATABASE=${DB_NAME},GCS_BUCKET_NAME=${BUCKET_NAME},NODE_ENV=production" \
+   60   --set-secrets="DB_PASSWORD=DB_PASSWORD:latest,SESSION_SECRET=SESSION_SECRET:latest,JWT_SECRET=JWT_SECRET:latest,GOOGLE_CLIENT_ID=GOOGLE_CLIENT_ID:latest,GOOGLE_CLIENT_SECRET=GOOGLE_CLIENT_SECRET:latest"
+   61
+   62 echo ">>> Implantação enviada. Verifique o status acima."
+   63 echo ">>> Se tudo correu bem, a URL do serviço será exibida."

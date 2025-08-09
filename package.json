@@ -53,6 +53,9 @@
     "multer": "^2.0.2",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
+    "@google-cloud/storage": "^7.7.0",
+    "connect-pg-simple": "^9.0.1",
+    "pg": "^8.11.3",
     "sqlite3": "^5.1.7",
     "xss": "^1.0.15"
   },
