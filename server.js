@@ -1,3 +1,4 @@
+console.log("--- PROVA DE VIDA: DEPLOY DE TESTE v4 ---");
 // server.js - Versão com correções de segurança e suporte a PostgreSQL
 const express = require('express');
 const bcrypt = require('bcryptjs');
