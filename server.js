@@ -1212,15 +1212,16 @@ app.get('/health', (req, res) => {
     
     try {
         // Test database connectivity
-        db.get('SELECT 1', (err) => {
-            if (err) {
+        dbGet('SELECT 1')
+            .then(() => {
+                healthCheck.database = 'OK';
+                res.status(200).json(healthCheck);
+            })
+            .catch((err) => {
                 healthCheck.message = 'Database connection failed';
                 healthCheck.database = 'ERROR';
-                return res.status(503).json(healthCheck);
-            }
-            healthCheck.database = 'OK';
-            res.status(200).json(healthCheck);
-        });
+                res.status(503).json(healthCheck);
+            });
     } catch (error) {
         healthCheck.message = 'Health check failed';
         healthCheck.error = error.message;
